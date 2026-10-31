@@ -5,10 +5,14 @@ An open-source userspace driver for the SHINING 3D Einstar handheld scanner
 3D-scanning software. The first integration target is
 [RTAB-Map](https://github.com/introlab/rtabmap).
 
-**Status: pre-hardware.** The protocol was reconstructed from static analysis of
-EXStar 3.1.3 and EXStar's own runtime logs. Nothing has been verified against a
-live scanner yet. See [docs/PROTOCOL.md](docs/PROTOCOL.md); every fact is tagged
-as observed, derived, inferred or unknown.
+**Status: tested on hardware.** The protocol was reconstructed from static
+analysis of EXStar 3.1.3 and EXStar's own runtime logs, then checked against a
+real Einstar (firmware `EinScan10_01_SC130_FX3_V2.14_FPGA_V3.7_EN`) on macOS:
+device info, calibration read, streaming, depth, live scanning in the RTAB-Map
+app and object scans fused with Open3D. Linux, Windows and other firmware
+versions are untested, and scan accuracy has not been measured against a
+reference object. See [docs/PROTOCOL.md](docs/PROTOCOL.md); every fact is tagged
+as verified on hardware, observed, derived, inferred or unknown.
 
 **Testing with a scanner?** Start with [docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md)
 or run `scripts/einstar-bringup.sh build`.

@@ -1,7 +1,9 @@
 # Hardware bring-up
 
-None of libeinstar's device code has run against a scanner yet. This is the
-order to try it in, what each step proves, and what to report back.
+libeinstar has been tested with one Einstar (firmware
+`EinScan10_01_SC130_FX3_V2.14_FPGA_V3.7_EN`) on macOS. To bring up another
+scanner, firmware or OS, this is the order to try it in, what each step
+proves, and what to report back.
 
 ## Before you start
 
