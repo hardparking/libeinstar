@@ -1,0 +1,937 @@
+From 7dec8ba8f0a2f2aee058997c783f3dad4cb3848f Mon Sep 17 00:00:00 2001
+From: Adam Wien <adam.wien@gmail.com>
+Date: Fri, 30 Oct 2026 17:53:10 -0700
+Subject: [PATCH] Add SHINING 3D Einstar camera driver (libeinstar)
+
+New CameraEinstar RGB-D driver backed by the open-source libeinstar
+userspace driver: depth from the scanner's IR stereo pair registered to
+its colour camera, calibration read from the scanner. Optional
+dependency (WITH_EINSTAR). Available in Preferences > Source > RGB-D and
+as driver 18 in rtabmap-camera, including a replay mode.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |  26 ++
+ RTABMapConfig.cmake.in                        |   4 +
+ Version.h.in                                  |   1 +
+ corelib/include/rtabmap/core/CameraRGBD.h     |   1 +
+ .../rtabmap/core/camera/CameraEinstar.h       |  98 ++++
+ corelib/src/CMakeLists.txt                    |   9 +
+ corelib/src/camera/CameraEinstar.cpp          | 436 ++++++++++++++++++
+ guilib/include/rtabmap/gui/MainWindow.h       |   1 +
+ .../include/rtabmap/gui/PreferencesDialog.h   |   1 +
+ guilib/src/MainWindow.cpp                     |   8 +
+ guilib/src/PreferencesDialog.cpp              |  13 +
+ guilib/src/ui/mainWindow.ui                   |  15 +
+ guilib/src/ui/preferencesDialog.ui            |   5 +
+ tools/CameraRGBD/main.cpp                     |  39 +-
+ 14 files changed, 654 insertions(+), 3 deletions(-)
+ create mode 100644 corelib/include/rtabmap/core/camera/CameraEinstar.h
+ create mode 100644 corelib/src/camera/CameraEinstar.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d5b6ee6..1672f55 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -272,6 +272,7 @@ option(WITH_FREENECT      "Include Freenect support"             ON)
+ option(WITH_FREENECT2     "Include Freenect2 support"            ON)
+ option(WITH_K4W2          "Include Kinect for Windows v2 support" ON)
+ option(WITH_K4A           "Include Kinect for Azure support"     ON)
++option(WITH_EINSTAR       "Include SHINING 3D Einstar support (libeinstar)" ON)
+ option(WITH_OPENNI        "Include OpenNI support"               ON)
+ option(WITH_OPENNI2       "Include OpenNI2 support"              ON)
+ option(WITH_DC1394        "Include dc1394 support"               ON)
+@@ -590,6 +591,17 @@ IF(WITH_K4A)
+     ENDIF(k4a_FOUND)
+ ENDIF(WITH_K4A)
+ 
++IF(WITH_EINSTAR)
++    FIND_PACKAGE(einstar QUIET)
++    IF(einstar_FOUND AND NOT einstar_HAS_DEPTH)
++        MESSAGE(STATUS "Found libeinstar without einstar::depth (OpenCV), Einstar support disabled")
++        SET(einstar_FOUND FALSE)
++    ENDIF()
++    IF(einstar_FOUND)
++       MESSAGE(STATUS "Found libeinstar: ${einstar_DIR}")
++    ENDIF(einstar_FOUND)
++ENDIF(WITH_EINSTAR)
++
+ # IF PCL depends on OpenNI2 (already found), ignore WITH_OPENNI2
+ IF(WITH_OPENNI2 OR OpenNI2_FOUND)
+     FIND_PACKAGE(OpenNI2 QUIET)
+@@ -1228,6 +1240,12 @@ ENDIF()
+ IF(NOT KinectSDK2_FOUND)
+    SET(K4W2 "//")
+ ENDIF()
++IF(NOT einstar_FOUND)
++   SET(EINSTAR "//")
++   SET(CONF_WITH_EINSTAR 0)
++ELSE()
++   SET(CONF_WITH_EINSTAR 1)
++ENDIF()
+ IF(NOT k4a_FOUND)
+    SET(K4A "//")
+    SET(CONF_WITH_K4A 0)
+@@ -1976,6 +1994,14 @@ ELSE()
+ MESSAGE(STATUS "  With Kinect for Windows 2 = NO (Kinect for Windows 2 SDK not found)")
+ ENDIF()
+ 
++IF(einstar_FOUND)
++MESSAGE(STATUS "  With SHINING 3D Einstar   = YES (License: BSD)")
++ELSEIF(NOT WITH_EINSTAR)
++MESSAGE(STATUS "  With SHINING 3D Einstar   = NO (WITH_EINSTAR=OFF)")
++ELSE()
++MESSAGE(STATUS "  With SHINING 3D Einstar   = NO (libeinstar not found)")
++ENDIF()
++
+ IF(k4a_FOUND)
+ MESSAGE(STATUS "  With Kinect for Azure     = YES (License: MIT)")
+ ELSEIF(NOT WITH_K4A)
+diff --git a/RTABMapConfig.cmake.in b/RTABMapConfig.cmake.in
+index 713359b..9b68b37 100644
+--- a/RTABMapConfig.cmake.in
++++ b/RTABMapConfig.cmake.in
+@@ -33,6 +33,10 @@ IF(@CONF_WITH_REALSENSE2@)
+     ENDIF()
+ ENDIF()
+ 
++IF(@CONF_WITH_EINSTAR@)
++    find_dependency(einstar)
++ENDIF()
++
+ IF(@CONF_WITH_K4A@)
+     IF(WIN32)
+         find_dependency(K4A)
+diff --git a/Version.h.in b/Version.h.in
+index f7ebbe9..dc464b3 100644
+--- a/Version.h.in
++++ b/Version.h.in
+@@ -58,6 +58,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ @FREENECT2@#define RTABMAP_FREENECT2
+ @K4W2@#define RTABMAP_K4W2
+ @K4A@#define RTABMAP_K4A
++@EINSTAR@#define RTABMAP_EINSTAR
+ @CVSBA@#define RTABMAP_CVSBA
+ @POINTMATCHER@#define RTABMAP_POINTMATCHER
+ @CCCORELIB@#define RTABMAP_CCCORELIB
+diff --git a/corelib/include/rtabmap/core/CameraRGBD.h b/corelib/include/rtabmap/core/CameraRGBD.h
+index 11439ce..dd9b1b8 100644
+--- a/corelib/include/rtabmap/core/CameraRGBD.h
++++ b/corelib/include/rtabmap/core/CameraRGBD.h
+@@ -38,4 +38,5 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <rtabmap/core/camera/CameraRGBDImages.h>
+ #include <rtabmap/core/camera/CameraK4A.h>
+ #include <rtabmap/core/camera/CameraSeerSense.h>
++#include <rtabmap/core/camera/CameraEinstar.h>
+ #include <rtabmap/core/camera/CameraOrbbecSDK.h>
+diff --git a/corelib/include/rtabmap/core/camera/CameraEinstar.h b/corelib/include/rtabmap/core/camera/CameraEinstar.h
+new file mode 100644
+index 0000000..8b1b0f0
+--- /dev/null
++++ b/corelib/include/rtabmap/core/camera/CameraEinstar.h
+@@ -0,0 +1,98 @@
++/*
++Copyright (c) 2010-2026, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++    * Redistributions of source code must retain the above copyright
++      notice, this list of conditions and the following disclaimer.
++    * Redistributions in binary form must reproduce the above copyright
++      notice, this list of conditions and the following disclaimer in the
++      documentation and/or other materials provided with the distribution.
++    * Neither the name of the Universite de Sherbrooke nor the
++      names of its contributors may be used to endorse or promote products
++      derived from this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
++DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++*/
++
++
++#pragma once
++
++#include "rtabmap/core/rtabmap_core_export.h" // DLL export/import defines
++
++#include "rtabmap/core/CameraModel.h"
++#include "rtabmap/core/Camera.h"
++#include "rtabmap/core/Version.h"
++
++#include <memory>
++#include <string>
++
++namespace einstar
++{
++class Device;
++class StereoDepth;
++}
++
++namespace rtabmap
++{
++
++/**
++ * SHINING 3D Einstar handheld scanner, through the open-source libeinstar
++ * userspace driver.
++ *
++ * Produces RGB-D frames: depth is computed from the IR stereo pair (the
++ * projected speckle moves with the scanner, so it is used for depth only)
++ * and registered into the undistorted colour image, which drives odometry.
++ *
++ * Calibration comes from the scanner itself when calibrationPath is empty,
++ * otherwise from an EXStar project camera model (*.data_cm), EXStar's
++ * calibration cache directory (TexCCF.txt, LeftCCF.txt, RightCCF.txt) or a
++ * custom-info dump from einstar-probe. A replay directory of libeinstar captures
++ * (frame_<id>_cam<n>.pgm) can be used instead of a live device.
++ */
++class RTABMAP_CORE_EXPORT CameraEinstar :
++	public Camera
++{
++public:
++	static bool available();
++
++public:
++	CameraEinstar(
++		const std::string & calibrationPath = "",
++		const std::string & replayDir = "",
++		float imageRate = 0.0f,
++		const Transform & localTransform = Transform::getIdentity());
++	virtual ~CameraEinstar();
++
++	virtual bool init(const std::string & calibrationFolder = ".", const std::string & cameraName = "");
++	virtual bool isCalibrated() const;
++	virtual std::string getSerial() const;
++
++	// Working range used for stereo matching (mm).
++	void setDepthRange(float minDepthMm, float maxDepthMm);
++
++protected:
++	virtual SensorData captureImage(SensorCaptureInfo * info = 0);
++
++private:
++	struct Impl;
++	std::string calibrationPath_;
++	std::string replayDir_;
++	float minDepthMm_;
++	float maxDepthMm_;
++#ifdef RTABMAP_EINSTAR
++	std::unique_ptr<Impl> impl_;
++#endif
++};
++
++} // namespace rtabmap
+diff --git a/corelib/src/CMakeLists.txt b/corelib/src/CMakeLists.txt
+index 86ac45d..101904f 100644
+--- a/corelib/src/CMakeLists.txt
++++ b/corelib/src/CMakeLists.txt
+@@ -41,6 +41,7 @@ SET(SRC_FILES
+     camera/CameraMyntEye.cpp
+     camera/CameraDepthAI.cpp
+ 	camera/CameraSeerSense.cpp
++	camera/CameraEinstar.cpp
+ 	camera/CameraOrbbecSDK.cpp
+     
+     EpipolarGeometry.cpp
+@@ -300,6 +301,14 @@ IF(KinectSDK2_FOUND)
+ 	)
+ ENDIF(KinectSDK2_FOUND)
+ 
++IF(einstar_FOUND)
++	SET(PUBLIC_LIBRARIES
++		${PUBLIC_LIBRARIES}
++		einstar::einstar
++		einstar::depth
++	)
++ENDIF(einstar_FOUND)
++
+ IF(k4a_FOUND)
+ 	SET(PUBLIC_INCLUDE_DIRS
+ 		${PUBLIC_INCLUDE_DIRS}
+diff --git a/corelib/src/camera/CameraEinstar.cpp b/corelib/src/camera/CameraEinstar.cpp
+new file mode 100644
+index 0000000..5028ec7
+--- /dev/null
++++ b/corelib/src/camera/CameraEinstar.cpp
+@@ -0,0 +1,436 @@
++/*
++Copyright (c) 2010-2026, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++    * Redistributions of source code must retain the above copyright
++      notice, this list of conditions and the following disclaimer.
++    * Redistributions in binary form must reproduce the above copyright
++      notice, this list of conditions and the following disclaimer in the
++      documentation and/or other materials provided with the distribution.
++    * Neither the name of the Universite de Sherbrooke nor the
++      names of its contributors may be used to endorse or promote products
++      derived from this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
++DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++*/
++
++
++#include <rtabmap/core/camera/CameraEinstar.h>
++#include <rtabmap/utilite/ULogger.h>
++#include <rtabmap/utilite/UDirectory.h>
++#include <rtabmap/utilite/UTimer.h>
++
++#ifdef RTABMAP_EINSTAR
++#include <einstar/calibration.hpp>
++#include <einstar/depth.hpp>
++#include <einstar/device.hpp>
++#include <einstar/exposure.hpp>
++#include <opencv2/imgcodecs.hpp>
++#include <opencv2/imgproc.hpp>
++#include <chrono>
++#include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
++#include <deque>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <optional>
++#include <set>
++#endif
++
++namespace rtabmap
++{
++
++#ifdef RTABMAP_EINSTAR
++namespace
++{
++const int kWidth = 1280;
++const int kHeight = 1024;
++const size_t kMaxPending = 8;
++}
++
++struct CameraEinstar::Impl
++{
++	struct Group
++	{
++		cv::Mat ir[2];
++		cv::Mat color; // raw Bayer
++	};
++
++	std::unique_ptr<einstar::StereoDepth> depth;
++	std::unique_ptr<einstar::Device> device;
++	CameraModel colorModel;
++	std::string serial;
++
++	std::mutex mutex;
++	std::condition_variable cv;
++	std::map<uint32_t, Group> pending;
++	std::deque<Group> ready;
++	cv::Mat lastColor;
++
++	std::vector<uint32_t> replayIds;
++	size_t replayIndex = 0;
++	// The first frame sets after the trigger starts are overexposed (observed),
++	// as the vendor's CEinScan10::discardFrames suggests.
++	int setsToDiscard = 2;
++	einstar::AutoExposure autoExposure;
++	uint32_t irExposureUs = einstar::ScanSettings().ir_exposure_us;
++
++	// Bring-up aid: with EINSTAR_RECORD_DIR set, live frame sets are saved
++	// like einstar-probe captures (replayable) with a per-frame log.
++	std::string recordDir;
++	std::ofstream recordLog;
++	uint32_t recordSeq = 0;
++
++	void onFrame(einstar::Frame && f)
++	{
++		std::optional<unsigned> cam = f.info.camera_index();
++		if(!cam)
++		{
++			return;
++		}
++		cv::Mat img = cv::Mat(kHeight, kWidth, CV_8UC1, f.data.data()).clone();
++		std::lock_guard<std::mutex> lock(mutex);
++		if(*cam == 2)
++		{
++			lastColor = img;
++			return;
++		}
++		Group & g = pending[f.info.frame_id];
++		g.ir[*cam] = img;
++		if(!g.ir[0].empty() && !g.ir[1].empty())
++		{
++			g.color = lastColor;
++			if(setsToDiscard > 0)
++			{
++				--setsToDiscard;
++				pending.erase(f.info.frame_id);
++				return;
++			}
++			ready.push_back(std::move(g));
++			pending.erase(f.info.frame_id);
++			if(ready.size() > 2)
++			{
++				ready.pop_front(); // keep latency low
++			}
++			cv.notify_one();
++		}
++		while(pending.size() > kMaxPending)
++		{
++			pending.erase(pending.begin());
++		}
++	}
++
++	bool nextLive(Group & out, int timeoutMs)
++	{
++		std::unique_lock<std::mutex> lock(mutex);
++		if(!cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this]{return !ready.empty();}))
++		{
++			return false;
++		}
++		out = std::move(ready.front());
++		ready.pop_front();
++		return true;
++	}
++
++	bool nextReplay(const std::string & dir, Group & out)
++	{
++		while(replayIndex < replayIds.size())
++		{
++			uint32_t id = replayIds[replayIndex++];
++			Group g;
++			for(unsigned c=0; c<3; ++c)
++			{
++				char name[64];
++				snprintf(name, sizeof(name), "frame_%06u_cam%u.pgm", id, c);
++				cv::Mat m = cv::imread(dir + "/" + name, cv::IMREAD_GRAYSCALE);
++				if(c < 2)
++				{
++					g.ir[c] = m;
++				}
++				else if(!m.empty())
++				{
++					lastColor = m;
++				}
++			}
++			g.color = lastColor;
++			if(!g.ir[0].empty() && !g.ir[1].empty())
++			{
++				out = std::move(g);
++				return true;
++			}
++		}
++		return false;
++	}
++};
++#endif
++
++bool CameraEinstar::available()
++{
++#ifdef RTABMAP_EINSTAR
++	return true;
++#else
++	return false;
++#endif
++}
++
++CameraEinstar::CameraEinstar(
++		const std::string & calibrationPath,
++		const std::string & replayDir,
++		float imageRate,
++		const Transform & localTransform) :
++	Camera(imageRate, localTransform),
++	calibrationPath_(calibrationPath),
++	replayDir_(replayDir),
++	minDepthMm_(130.0f),
++	maxDepthMm_(800.0f)
++{
++}
++
++CameraEinstar::~CameraEinstar()
++{
++#ifdef RTABMAP_EINSTAR
++	if(impl_.get() && impl_->device.get())
++	{
++		impl_->device->stop_scanning();
++		impl_->device->lights_off();
++		impl_->device->stop_stream();
++	}
++#endif
++}
++
++void CameraEinstar::setDepthRange(float minDepthMm, float maxDepthMm)
++{
++	minDepthMm_ = minDepthMm;
++	maxDepthMm_ = maxDepthMm;
++}
++
++bool CameraEinstar::init(const std::string &, const std::string &)
++{
++#ifdef RTABMAP_EINSTAR
++	impl_.reset(new Impl());
++	const bool live = replayDir_.empty();
++	if(live)
++	{
++		// Writes are needed to start the scan trigger; libeinstar only allows
++		// volatile settings (no flash writes or reboot).
++		einstar::OpenOptions options;
++		options.allow_writes = true;
++		einstar::Result<std::unique_ptr<einstar::Device> > dev = einstar::Device::open(std::nullopt, options);
++		if(!dev)
++		{
++			UERROR("Einstar: %s", dev.error().message.c_str());
++			return false;
++		}
++		impl_->device = std::move(dev.value());
++		impl_->serial = impl_->device->serial();
++		if(const char * dir = std::getenv("EINSTAR_RECORD_DIR"))
++		{
++			impl_->recordDir = dir;
++			UDirectory::makeDir(impl_->recordDir);
++			impl_->recordLog.open(impl_->recordDir + "/record.tsv");
++			impl_->recordLog << "seq\tir_exposure_us\tdepth_coverage\n";
++			UWARN("Einstar: recording frame sets to %s", dir);
++		}
++	}
++
++	std::optional<einstar::CameraModel> model;
++	if(calibrationPath_.empty() && live)
++	{
++		einstar::Result<einstar::CameraModel> fromDevice = impl_->device->read_calibration();
++		if(!fromDevice)
++		{
++			UERROR("Einstar: cannot read calibration from the scanner: %s", fromDevice.error().message.c_str());
++			return false;
++		}
++		model = fromDevice.value();
++	}
++	else
++	{
++		einstar::CalibrationResult calib = einstar::load_calibration(calibrationPath_);
++		if(!calib.model)
++		{
++			UERROR("Einstar: cannot load calibration \"%s\": %s", calibrationPath_.c_str(), einstar::to_string(*calib.error));
++			return false;
++		}
++		model = calib.model;
++	}
++	einstar::DepthParams params;
++	params.min_depth_mm = minDepthMm_;
++	params.max_depth_mm = maxDepthMm_;
++	impl_->depth.reset(new einstar::StereoDepth(*model, cv::Size(kWidth, kHeight), params));
++	// The calibration frame is upside down relative to the scanner's natural
++	// orientation (how the colour stream arrives), so images are rotated by
++	// 180 degrees for output: the principal point mirrors and the optical
++	// frame turns about its z axis.
++	cv::Mat K = impl_->depth->color_K().clone();
++	K.at<double>(0, 2) = kWidth - 1 - K.at<double>(0, 2);
++	K.at<double>(1, 2) = kHeight - 1 - K.at<double>(1, 2);
++	cv::Mat P = cv::Mat::zeros(3, 4, CV_64FC1);
++	K.copyTo(P.colRange(0, 3));
++	impl_->colorModel = CameraModel(
++			"einstar_color",
++			cv::Size(kWidth, kHeight),
++			K,
++			cv::Mat::zeros(1, 5, CV_64FC1),
++			cv::Mat::eye(3, 3, CV_64FC1),
++			P,
++			this->getLocalTransform() * Transform(-1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0));
++	UINFO("Einstar: calibration loaded, IR baseline %.1f mm", impl_->depth->baseline_mm());
++
++	if(!live)
++	{
++		UDirectory dir(replayDir_, "pgm");
++		std::set<uint32_t> ids;
++		for(std::string f = dir.getNextFileName(); !f.empty(); f = dir.getNextFileName())
++		{
++			unsigned id, cam;
++			if(sscanf(f.c_str(), "frame_%u_cam%u.pgm", &id, &cam) == 2)
++			{
++				ids.insert(id);
++			}
++		}
++		impl_->replayIds.assign(ids.begin(), ids.end());
++		impl_->serial = "replay";
++		UINFO("Einstar: replaying %d frames from %s", (int)impl_->replayIds.size(), replayDir_.c_str());
++		return !impl_->replayIds.empty();
++	}
++
++	Impl * impl = impl_.get();
++	einstar::Status s = impl_->device->start_stream(
++			[impl](einstar::Frame && f){impl->onFrame(std::move(f));},
++			(size_t)kWidth * kHeight);
++	if(!s)
++	{
++		UERROR("Einstar: %s", s.error().message.c_str());
++		return false;
++	}
++	s = impl_->device->apply(einstar::ScanSettings());
++	if(!s)
++	{
++		UERROR("Einstar: cannot apply scan settings: %s", s.error().message.c_str());
++		impl_->device->stop_stream();
++		return false;
++	}
++	s = impl_->device->start_scanning();
++	if(!s)
++	{
++		UERROR("Einstar: cannot start scanning: %s", s.error().message.c_str());
++		impl_->device->stop_stream();
++		return false;
++	}
++	return true;
++#else
++	UERROR("CameraEinstar: RTAB-Map is not built with Einstar support!");
++	return false;
++#endif
++}
++
++bool CameraEinstar::isCalibrated() const
++{
++#ifdef RTABMAP_EINSTAR
++	return impl_.get() && impl_->depth.get();
++#else
++	return false;
++#endif
++}
++
++std::string CameraEinstar::getSerial() const
++{
++#ifdef RTABMAP_EINSTAR
++	if(impl_.get())
++	{
++		return impl_->serial;
++	}
++#endif
++	return "";
++}
++
++SensorData CameraEinstar::captureImage(SensorCaptureInfo * info)
++{
++	SensorData data;
++#ifdef RTABMAP_EINSTAR
++	if(!impl_.get() || !impl_->depth.get())
++	{
++		UERROR("Einstar: not initialized");
++		return data;
++	}
++	UTimer timer;
++	Impl::Group g;
++	bool ok = replayDir_.empty() ? impl_->nextLive(g, 1000) : impl_->nextReplay(replayDir_, g);
++	if(!ok)
++	{
++		return data;
++	}
++	if(g.color.empty())
++	{
++		// Depth is registered to the colour camera, so wait for a colour frame.
++		UWARN("Einstar: no colour frame received yet, skipping IR pair.");
++		return data;
++	}
++	// g.ir is indexed by stream camera; map it to the calibration IR cameras
++	// in calibration orientation.
++	cv::Mat irLeft, irRight;
++	for(unsigned stream = 0; stream < 2; ++stream)
++	{
++		(einstar::calibration_index_for_stream(stream) == einstar::kIrLeftCamera ? irLeft : irRight) =
++				einstar::to_calibration_orientation(g.ir[stream], stream);
++	}
++	const uint32_t exposureUs = impl_->irExposureUs; // in effect when this set was captured (approximately)
++	if(impl_->device.get())
++	{
++		// Keep the speckle unsaturated; adjust from this thread, not the stream thread.
++		std::optional<uint32_t> next = impl_->autoExposure.update(
++				einstar::ByteView(g.ir[0].data, g.ir[0].total()),
++				einstar::ByteView(g.ir[1].data, g.ir[1].total()),
++				impl_->irExposureUs);
++		if(next && impl_->device->set_exposure_us(0, *next) && impl_->device->set_exposure_us(1, *next))
++		{
++			impl_->irExposureUs = *next;
++		}
++	}
++	cv::Mat depthMm = impl_->depth->depth_in_color(irLeft, irRight);
++	if(!impl_->recordDir.empty())
++	{
++		const uint32_t seq = impl_->recordSeq++;
++		const cv::Mat * images[3] = {&g.ir[0], &g.ir[1], &g.color};
++		for(unsigned c=0; c<3; ++c)
++		{
++			char name[64];
++			snprintf(name, sizeof(name), "/frame_%06u_cam%u.pgm", seq, c);
++			cv::imwrite(impl_->recordDir + name, *images[c]);
++		}
++		impl_->recordLog << seq << '\t' << exposureUs << '\t'
++				<< (double)cv::countNonZero(depthMm) / depthMm.total() << '\n';
++		impl_->recordLog.flush();
++	}
++	cv::Mat depth16;
++	depthMm.convertTo(depth16, CV_16UC1);
++	cv::Mat rgb = impl_->depth->undistort_color(einstar::color_in_calibration_orientation(g.color));
++	// Present upright (see colorModel).
++	cv::rotate(depth16, depth16, cv::ROTATE_180);
++	cv::rotate(rgb, rgb, cv::ROTATE_180);
++	data = SensorData(rgb, depth16, impl_->colorModel, this->getNextSeqID(), UTimer::now());
++	if(info)
++	{
++		info->timeCapture = timer.ticks();
++	}
++#else
++	UERROR("CameraEinstar: RTAB-Map is not built with Einstar support!");
++#endif
++	return data;
++}
++
++} // namespace rtabmap
+diff --git a/guilib/include/rtabmap/gui/MainWindow.h b/guilib/include/rtabmap/gui/MainWindow.h
+index 24db894..919f093 100644
+--- a/guilib/include/rtabmap/gui/MainWindow.h
++++ b/guilib/include/rtabmap/gui/MainWindow.h
+@@ -194,6 +194,7 @@ protected Q_SLOTS:
+ 	void selectDepthAIOAKDLite();
+ 	void selectDepthAIOAKDPro();
+ 	void selectXvisioSeerSense();
++	void selectEinstar();
+ 	void selectVLP16();
+ 	void dumpTheMemory();
+ 	void dumpThePrediction();
+diff --git a/guilib/include/rtabmap/gui/PreferencesDialog.h b/guilib/include/rtabmap/gui/PreferencesDialog.h
+index 0696ca2..77760fa 100644
+--- a/guilib/include/rtabmap/gui/PreferencesDialog.h
++++ b/guilib/include/rtabmap/gui/PreferencesDialog.h
+@@ -99,6 +99,7 @@ public:
+ 		kSrcK4A            = 10,
+ 		kSrcSeerSense      = 11,
+ 		kSrcOrbbecSDK      = 12,
++		kSrcEinstar        = 13,
+ 
+ 		kSrcStereo         = 100,
+ 		kSrcDC1394         = 100,
+diff --git a/guilib/src/MainWindow.cpp b/guilib/src/MainWindow.cpp
+index 4c1ba37..72069fb 100644
+--- a/guilib/src/MainWindow.cpp
++++ b/guilib/src/MainWindow.cpp
+@@ -474,6 +474,7 @@ MainWindow::MainWindow(PreferencesDialog * prefDialog, QWidget * parent, bool sh
+ 	connect(_ui->actionDepthAI_oakdpro, SIGNAL(triggered()), this, SLOT(selectDepthAIOAKDPro()));
+ 	connect(_ui->actionXvisio_SeerSense, SIGNAL(triggered()), this, SLOT(selectXvisioSeerSense()));
+ 	connect(_ui->actionOrbbecSDK_astra2, SIGNAL(triggered()), this, SLOT(selectOrbbecSDK()));
++	connect(_ui->actionEinstar, SIGNAL(triggered()), this, SLOT(selectEinstar()));
+ 	connect(_ui->actionVelodyne_VLP_16, SIGNAL(triggered()), this, SLOT(selectVLP16()));
+ 	_ui->actionFreenect->setEnabled(CameraFreenect::available());
+ 	_ui->actionOpenNI_PCL->setEnabled(CameraOpenni::available());
+@@ -504,6 +505,7 @@ MainWindow::MainWindow(PreferencesDialog * prefDialog, QWidget * parent, bool sh
+     _ui->actionDepthAI_oakdpro->setEnabled(CameraDepthAI::available());
+ 	_ui->actionXvisio_SeerSense->setEnabled(CameraSeerSense::available());
+ 	_ui->actionOrbbecSDK_astra2->setEnabled(CameraOrbbecSDK::available());
++	_ui->actionEinstar->setEnabled(CameraEinstar::available());
+ 	this->updateSelectSourceMenu();
+ 
+ 	connect(_ui->actionPreferences, SIGNAL(triggered()), this, SLOT(openPreferences()));
+@@ -5410,6 +5412,7 @@ void MainWindow::updateSelectSourceMenu()
+ 	_ui->actionDepthAI_oakdpro->setChecked(_preferencesDialog->getSourceDriver() == PreferencesDialog::kSrcStereoDepthAI);
+ 	_ui->actionXvisio_SeerSense->setChecked(_preferencesDialog->getSourceDriver() == PreferencesDialog::kSrcSeerSense);
+ 	_ui->actionOrbbecSDK_astra2->setChecked(_preferencesDialog->getSourceDriver() == PreferencesDialog::kSrcOrbbecSDK);
++	_ui->actionEinstar->setChecked(_preferencesDialog->getSourceDriver() == PreferencesDialog::kSrcEinstar);
+ 	_ui->actionVelodyne_VLP_16->setChecked(_preferencesDialog->getLidarSourceDriver() == PreferencesDialog::kSrcLidarVLP16);
+ }
+ 
+@@ -7428,6 +7431,11 @@ void MainWindow::selectXvisioSeerSense()
+ 	_preferencesDialog->selectSourceDriver(PreferencesDialog::kSrcSeerSense);
+ }
+ 
++void MainWindow::selectEinstar()
++{
++	_preferencesDialog->selectSourceDriver(PreferencesDialog::kSrcEinstar);
++}
++
+ void MainWindow::selectVLP16()
+ {
+ 	_preferencesDialog->selectSourceDriver(PreferencesDialog::kSrcLidarVLP16);
+diff --git a/guilib/src/PreferencesDialog.cpp b/guilib/src/PreferencesDialog.cpp
+index 6e55e5d..64dbcdd 100644
+--- a/guilib/src/PreferencesDialog.cpp
++++ b/guilib/src/PreferencesDialog.cpp
+@@ -437,6 +437,10 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
+ 	{
+ 		_ui->comboBox_cameraRGBD->setItemData(kSrcOrbbecSDK - kSrcRGBD, 0, Qt::UserRole - 1);
+ 	}
++	if (!CameraEinstar::available())
++	{
++		_ui->comboBox_cameraRGBD->setItemData(kSrcEinstar - kSrcRGBD, 0, Qt::UserRole - 1);
++	}
+ 	if (!CameraRealSense::available())
+ 	{
+ 		_ui->comboBox_cameraRGBD->setItemData(kSrcRealSense - kSrcRGBD, 0, Qt::UserRole - 1);
+@@ -7082,6 +7086,15 @@ Camera * PreferencesDialog::createCamera(
+ 					IMUFilter::create((IMUFilter::Type)(getIMUFilteringStrategy()-1), this->getAllParameters()):0,
+ 					getIMUFilteringBaseFrameConversion());
+ 	}
++	else if (driver == kSrcEinstar)
++	{
++		// Calibration is read from the scanner itself.
++		camera = new CameraEinstar(
++			"",
++			"",
++			this->getGeneralInputRate(),
++			this->getSourceLocalTransform());
++	}
+ 	else if (driver == kSrcRealSense)
+ 	{
+ 		if(useRawImages && _ui->comboBox_realsenseRGBSource->currentIndex()!=2)
+diff --git a/guilib/src/ui/mainWindow.ui b/guilib/src/ui/mainWindow.ui
+index fc4519a..2c17b4b 100644
+--- a/guilib/src/ui/mainWindow.ui
++++ b/guilib/src/ui/mainWindow.ui
+@@ -249,6 +249,12 @@
+        </property>
+        <addaction name="actionOrbbecSDK_astra2"/>
+       </widget>
++      <widget class="QMenu" name="menuShining3D_Einstar">
++       <property name="title">
++        <string>SHINING 3D Einstar</string>
++       </property>
++       <addaction name="actionEinstar"/>
++      </widget>
+       <addaction name="menuKinect_for_Xbox_360"/>
+       <addaction name="menuXtion_PRO_LIVE"/>
+       <addaction name="menuOrbbec_Astra"/>
+@@ -262,6 +268,7 @@
+       <addaction name="menuRealSense_D435"/>
+       <addaction name="menuRealSense_L515"/>
+       <addaction name="menuXvisio_SeerSense"/>
++      <addaction name="menuShining3D_Einstar"/>
+      </widget>
+      <widget class="QMenu" name="menuStereo_camera">
+       <property name="title">
+@@ -1771,6 +1778,14 @@
+     <string>Orbbec SDK</string>
+    </property>
+   </action>
++  <action name="actionEinstar">
++   <property name="checkable">
++    <bool>true</bool>
++   </property>
++   <property name="text">
++    <string>Einstar</string>
++   </property>
++  </action>
+  </widget>
+  <customwidgets>
+   <customwidget>
+diff --git a/guilib/src/ui/preferencesDialog.ui b/guilib/src/ui/preferencesDialog.ui
+index 24378b4..bf0bec1 100644
+--- a/guilib/src/ui/preferencesDialog.ui
++++ b/guilib/src/ui/preferencesDialog.ui
+@@ -3570,6 +3570,11 @@ when using the file type, logs are saved in LogRtabmap.txt (located in the worki
+                                     <string>Orbbec SDK</string>
+                                    </property>
+                                   </item>
++                                  <item>
++                                   <property name="text">
++                                    <string>SHINING 3D Einstar</string>
++                                   </property>
++                                  </item>
+                                  </widget>
+                                 </item>
+                                 <item row="0" column="1">
+diff --git a/tools/CameraRGBD/main.cpp b/tools/CameraRGBD/main.cpp
+index 9f36bc4..c989ba3 100644
+--- a/tools/CameraRGBD/main.cpp
++++ b/tools/CameraRGBD/main.cpp
+@@ -72,12 +72,15 @@ void showUsage(const char * executableName)
+ 			"                                     15=depthai-core\n"
+ 			"                                     16=XVSDK     (SeerSense)\n"
+ 			"                                     17=Orbbec SDK\n"
++			"                                     18=Einstar   (SHINING 3D, libeinstar)\n"
+ 			"  Options:\n"
+ 			"      -r #.#                         Input rate Hz (default 0=inf)\n"
+ 			"      -d #                           Device ID (number or string)\n"
+ 			"      -w #                           Request a specific image width. Not all camera drivers support this.\n"
+ 			"      -h #                           Request a specific image height. Not all camera drivers support this.\n"
+-			"      -pcl                           Use PCL's CloudViewer for visualization (legacy).\n",
++			"      -pcl                           Use PCL's CloudViewer for visualization (legacy).\n"
++			"      -calib \"path\"                 Einstar: calibration file/dir (default: read from scanner).\n"
++			"      -replay \"path\"                Einstar: replay a directory of libeinstar captures.\n",
+ 		executableName);
+ 	exit(1);
+ }
+@@ -100,6 +103,8 @@ int main(int argc, char * argv[])
+ 	int driver = 0;
+ 	float rate = 0.0f;
+ 	std::string deviceId;
++	std::string einstarCalib;
++	std::string einstarReplay;
+ 	int width = 0;
+ 	int height = 0;
+ 	bool usePCLViz = false;
+@@ -167,6 +172,20 @@ int main(int argc, char * argv[])
+ 				}
+ 				continue;
+ 			}
++			if (strcmp(argv[i], "-calib") == 0 || strcmp(argv[i], "-replay") == 0)
++			{
++				bool isCalib = strcmp(argv[i], "-calib") == 0;
++				++i;
++				if(i < argc)
++				{
++					(isCalib?einstarCalib:einstarReplay) = argv[i];
++				}
++				else
++				{
++					showUsage(argv[0]);
++				}
++				continue;
++			}
+ 			if (strcmp(argv[i], "-pcl") == 0)
+ 			{
+ 				usePCLViz = true;
+@@ -184,9 +203,9 @@ int main(int argc, char * argv[])
+ 
+ 			// last
+ 			driver = atoi(argv[i]);
+-			if(driver < 0 || driver > 17)
++			if(driver < 0 || driver > 18)
+ 			{
+-				UERROR("driver should be between 0 and 17.");
++				UERROR("driver should be between 0 and 18.");
+ 				showUsage(argv[0]);
+ 			}
+ 		}
+@@ -358,6 +377,20 @@ int main(int argc, char * argv[])
+ 		else
+ 			camera = new rtabmap::CameraOrbbecSDK(deviceId, 800, 600, 800, 600, rate);
+ 	}
++	else if (driver == 18)
++	{
++		if (!rtabmap::CameraEinstar::available())
++		{
++			UERROR("Not built with Einstar (libeinstar) support...");
++			exit(-1);
++		}
++		if (einstarCalib.empty() && !einstarReplay.empty())
++		{
++			UERROR("Einstar replay needs a calibration (-calib).");
++			exit(-1);
++		}
++		camera = new rtabmap::CameraEinstar(einstarCalib, einstarReplay, rate);
++	}
+ 	else
+ 	{
+ 		UFATAL("");
+-- 
+2.54.0 (Apple Git-157)
+

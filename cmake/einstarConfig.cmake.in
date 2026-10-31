@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+set(einstar_HAS_DEPTH @EINSTAR_HAS_DEPTH@)
+if(einstar_HAS_DEPTH)
+  find_dependency(OpenCV COMPONENTS core imgproc calib3d)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/einstarTargets.cmake")
+check_required_components(einstar)
