@@ -3,6 +3,7 @@
 // Transport interface and records what it receives.
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <deque>

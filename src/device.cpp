@@ -2,6 +2,7 @@
 
 #include <libusb.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
