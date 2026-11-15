@@ -118,6 +118,10 @@ class StereoDepth {
   // from the images of calibration cameras kIrLeftCamera and kIrRightCamera.
   cv::Mat depth_in_color(const cv::Mat& ir_left, const cv::Mat& ir_right) const;
   cv::Mat undistort_color(const cv::Mat& bgr) const;
+  // Retro-reflective markers: bright round blobs found in both full-resolution
+  // IR images, matched along rectified rows and triangulated. Points are in
+  // millimetres in the undistorted colour frame, like depth_in_color.
+  std::vector<cv::Point3f> markers_in_color(const cv::Mat& ir_left, const cv::Mat& ir_right) const;
 
  private:
   cv::Size size_, scaled_;
@@ -128,6 +132,7 @@ class StereoDepth {
   cv::Mat map_l1_, map_l2_, map_r1_, map_r2_, map_c1_, map_c2_;
   cv::Mat mask_l_, mask_r_;
   cv::Mat color_K_;
+  cv::Mat K_l_, D_l_, R1_, P1_, K_r_, D_r_, R2_, P2_;  // full-resolution rectification, for marker points
   cv::Matx33d R_rect_to_color_;
   cv::Vec3d T_rect_to_color_;
 };

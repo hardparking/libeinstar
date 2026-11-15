@@ -189,7 +189,9 @@ StereoDepth::StereoDepth(const CameraModel& model, cv::Size size, DepthParams pa
   P2.at<double>(0, 2) = -view_r.x;
   P1.at<double>(1, 2) = P2.at<double>(1, 2) = -top;
   P2.at<double>(0, 3) = -f * baseline_mm_;
-  scaled_ = cv::Size(static_cast<int>(std::ceil(std::max(view_l.width, view_r.width) * params.scale)),
+  K_l_ = camera_matrix(l), D_l_ = distortion_coeffs(l), R1_ = R1.clone(), P1_ = P1.clone();
+  K_r_ = camera_matrix(r), D_r_ = distortion_coeffs(r), R2_ = R2.clone(), P2_ = P2.clone();
+  scaled_ =cv::Size(static_cast<int>(std::ceil(std::max(view_l.width, view_r.width) * params.scale)),
                      static_cast<int>(std::ceil((bottom - top) * params.scale)));
   // Rectify straight into the scaled image by scaling the projection rows.
   cv::Mat P1s = P1.clone(), P2s = P2.clone();
@@ -318,6 +320,77 @@ cv::Mat StereoDepth::undistort_color(const cv::Mat& bgr) const {
   cv::Mat out;
   cv::remap(bgr, out, map_c1_, map_c2_, cv::INTER_LINEAR);
   return out;
+}
+
+namespace {
+
+// Centres of bright elliptical discs. Retro-reflective markers are bright
+// only in the IR camera next to the flood LED, so the test is local contrast
+// (white top-hat over a 51 px background) rather than a fixed level. At
+// ~250 mm a marker is a ~20-30 px disc, an ellipse when seen at an angle;
+// opening with a 7 px disc removes laser speckle dots, and the size and
+// ellipse-fill tests drop glints and small print.
+std::vector<cv::Point2f> bright_blobs(const cv::Mat& img) {
+  cv::Mat top, bin;
+  cv::morphologyEx(img, top, cv::MORPH_TOPHAT, cv::getStructuringElement(cv::MORPH_ELLIPSE, {51, 51}));
+  cv::threshold(top, bin, 70, 255, cv::THRESH_BINARY);
+  cv::morphologyEx(bin, bin, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_ELLIPSE, {7, 7}));
+  std::vector<std::vector<cv::Point>> contours;
+  cv::findContours(bin, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+  std::vector<cv::Point2f> out;
+  for (const auto& c : contours) {
+    const double area = cv::contourArea(c);
+    if (area < 80 || area > 2500 || c.size() < 8) continue;
+    const cv::RotatedRect e = cv::fitEllipse(c);
+    const double lo = std::min(e.size.width, e.size.height), hi = std::max(e.size.width, e.size.height);
+    if (lo < 9 || hi > 3 * lo || area < 0.8 * CV_PI * lo * hi / 4) continue;
+    out.push_back(e.center);
+  }
+  return out;
+}
+
+}  // namespace
+
+std::vector<cv::Point3f> StereoDepth::markers_in_color(const cv::Mat& ir_left, const cv::Mat& ir_right) const {
+  const cv::Mat& l = left_ == kIrLeftCamera ? ir_left : ir_right;
+  const cv::Mat& r = left_ == kIrLeftCamera ? ir_right : ir_left;
+  std::vector<cv::Point2f> bl = bright_blobs(l), br = bright_blobs(r), rl, rr;
+  std::vector<cv::Point3f> out;
+  if (bl.empty() || br.empty()) return out;
+  cv::undistortPoints(bl, rl, K_l_, D_l_, R1_, P1_);
+  cv::undistortPoints(br, rr, K_r_, D_r_, R2_, P2_);
+  const double f = P1_.at<double>(0, 0), cx = P1_.at<double>(0, 2), cy = P1_.at<double>(1, 2);
+  const double offset = P1_.at<double>(0, 2) - P2_.at<double>(0, 2);
+  constexpr double kRowTolerance = 1.5;  // px; markers are matched by rectified row
+  for (const auto& p : rl) {
+    int match = -1, candidates = 0;
+    double best = kRowTolerance;
+    for (std::size_t j = 0; j < rr.size(); ++j) {
+      const double dy = std::abs(rr[j].y - p.y), d = p.x - rr[j].x - offset;
+      if (dy > kRowTolerance || d <= 0) continue;
+      const double Z = f * baseline_mm_ / d;
+      if (Z < params_.min_depth_mm || Z > params_.max_depth_mm) continue;
+      ++candidates;
+      if (dy <= best) best = dy, match = static_cast<int>(j);
+    }
+    if (candidates != 1) continue;  // ambiguous rows are skipped rather than guessed
+    const double Z = f * baseline_mm_ / (p.x - rr[match].x - offset);
+    const cv::Vec3d q = R_rect_to_color_ * cv::Vec3d((p.x - cx) * Z / f, (p.y - cy) * Z / f, Z) + T_rect_to_color_;
+    out.emplace_back(static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2]));
+  }
+  // A marker can split into two blobs (seen ~2.5 mm apart on hardware); real
+  // markers are further apart, so points within 4 mm are averaged into one.
+  std::vector<cv::Point3f> merged;
+  std::vector<bool> used(out.size(), false);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (used[i]) continue;
+    cv::Point3f sum = out[i];
+    int n = 1;
+    for (std::size_t j = i + 1; j < out.size(); ++j)
+      if (!used[j] && cv::norm(out[j] - out[i]) < 4.0f) sum += out[j], ++n, used[j] = true;
+    merged.push_back(sum * (1.0f / static_cast<float>(n)));
+  }
+  return merged;
 }
 
 }  // namespace einstar

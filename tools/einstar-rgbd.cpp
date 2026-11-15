@@ -5,11 +5,16 @@
 //
 // --backend auto|cpu|metal picks the stereo matcher (default auto: Metal on
 // Apple silicon); all give the same depth.
+// Depth options (defaults as in DepthParams): --min-depth-mm N, --max-depth-mm N,
+// --scale S and --single-pass (match only at stretch 1). Matching dominates the
+// cost and grows with the depth window; on a memory-bound desktop (i7-4790K)
+// 160-500 mm at scale 0.4 ran ~5x faster than the defaults.
 //
 // Each frame set becomes OUT_DIR/c_NNNNN.png (colour, BGR) and
 // OUT_DIR/d_NNNNN.png (depth, uint16 in 0.1 mm, 0 = none), both at half
 // resolution (640x512) in the undistorted colour camera, upright.
-// OUT_DIR/intrinsics.txt holds "fx fy cx cy width height" for those images
+// OUT_DIR/m_NNNNN.txt lists retro-reflective markers, one "x y z" (mm) per
+// line in the same upright camera frame. OUT_DIR/intrinsics.txt holds "fx fy cx cy width height" for those images
 // and is written first; OUT_DIR/done is written last. Live frames appear
 // while scanning (the depth image is renamed into place last), so a reader
 // can follow the directory. Live mode reads the calibration from the scanner
@@ -83,6 +88,12 @@ class Writer {
     char name[32];
     std::snprintf(name, sizeof name, "c_%05d.png", n_);
     cv::imwrite((dir_ / name).string(), c);
+    // Markers in the same upright camera frame as the images (the 180 degree
+    // turn negates x and y), written before the depth image completes the set.
+    std::snprintf(name, sizeof name, "m_%05d.txt", n_);
+    std::ofstream markers(dir_ / name);
+    for (const auto& p : depth_.markers_in_color(left, right)) markers << -p.x << ' ' << -p.y << ' ' << p.z << '\n';
+    markers.close();
     std::snprintf(name, sizeof name, "d_%05d.png", n_);
     const fs::path tmp = dir_ / ".d_tmp.png";
     cv::imwrite(tmp.string(), d);
@@ -163,7 +174,7 @@ int live(Device& dev, Writer& writer, int seconds) {
     dev.stop_stream();
     return 1;
   }
-  if (auto st = dev.start_scanning(); !st) {
+  if (auto st = dev.start_scanning(90000, ScanSettings{}.mono_triggers, ScanSettings{}.rgb_triggers); !st) {
     std::fprintf(stderr, "start scanning failed: %s\n", st.error().message.c_str());
     dev.stop_stream();
     return 1;
@@ -212,6 +223,10 @@ int main(int argc, char** argv) {
       }
       params.backend = *b;
     }
+    else if (a == "--min-depth-mm" && i + 1 < argc) params.min_depth_mm = std::strtof(argv[++i], nullptr);
+    else if (a == "--max-depth-mm" && i + 1 < argc) params.max_depth_mm = std::strtof(argv[++i], nullptr);
+    else if (a == "--scale" && i + 1 < argc) params.scale = std::strtod(argv[++i], nullptr);
+    else if (a == "--single-pass") params.stretches = {1.0};
     else if (out.empty() && a[0] != '-') out = a;
     else {
       std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
@@ -219,8 +234,15 @@ int main(int argc, char** argv) {
     }
   }
   if (out.empty() || (!replay_dir.empty() && calib_path.empty())) {
-    std::fprintf(stderr, "usage: %s OUT_DIR [--calib FILE] [--seconds N] | OUT_DIR --calib FILE --replay FRAME_DIR [--backend auto|cpu|metal]\n",
+    std::fprintf(stderr,
+                 "usage: %s OUT_DIR [--calib FILE] [--seconds N] | OUT_DIR --calib FILE --replay FRAME_DIR\n"
+                 "       depth: [--backend auto|cpu|metal] [--min-depth-mm N] [--max-depth-mm N] [--scale S] [--single-pass]\n",
                  argv[0]);
+    return 2;
+  }
+  if (!(params.min_depth_mm > 0 && params.max_depth_mm > params.min_depth_mm && params.scale > 0 &&
+        params.scale <= 1)) {
+    std::fprintf(stderr, "need 0 < --min-depth-mm < --max-depth-mm and 0 < --scale <= 1\n");
     return 2;
   }
   if (!backend_available(params.backend)) {
