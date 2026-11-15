@@ -13,7 +13,8 @@
 //                lighting is switched off afterwards; override with
 //                --strobe ROUTE:LUM  --laser PCT  --exposure CAM:US  --gain CAM:G
 //                (repeatable), or --no-lights to leave lighting untouched;
-//                IR auto-exposure runs unless --fixed-exposure
+//                IR auto-exposure runs unless --fixed-exposure;
+//                --triggers MONO:RGB sets IR/colour frames per trigger cycle
 //   --mask                             XOR-mask commands (unverified requirement)
 //
 // Without --scan nothing changes device state. --scan sends exactly EXStar's
@@ -64,6 +65,7 @@ int main(int argc, char** argv) {
   int raw_group = -1, raw_opcode = -1;
   std::vector<std::pair<unsigned, unsigned>> strobes, exposures, gains;
   int laser = -1;
+  std::pair<unsigned, unsigned> triggers{ScanSettings{}.mono_triggers, ScanSettings{}.rgb_triggers};
   bool lights = true;
   bool auto_exposure = true;
   auto pair_arg = [](const char* a) {
@@ -83,6 +85,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--exposure") && i + 1 < argc) exposures.push_back(pair_arg(argv[++i]));
     else if (!std::strcmp(argv[i], "--gain") && i + 1 < argc) gains.push_back(pair_arg(argv[++i]));
     else if (!std::strcmp(argv[i], "--laser") && i + 1 < argc) laser = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--triggers") && i + 1 < argc) triggers = pair_arg(argv[++i]);
     else if (!std::strcmp(argv[i], "--no-lights")) lights = false;
     else if (!std::strcmp(argv[i], "--fixed-exposure")) auto_exposure = false;
     else if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = std::atoi(argv[++i]);
@@ -231,7 +234,7 @@ int main(int argc, char** argv) {
       if (laser >= 0) check("laser", d.set_laser_brightness(static_cast<std::uint8_t>(laser)));
     }
     if (scan) {
-      if (auto st = d.start_scanning(); !st) {
+      if (auto st = d.start_scanning(90000, triggers.first, triggers.second); !st) {
         std::fprintf(stderr, "start scanning failed: %s\n", st.error().message.c_str());
         d.stop_stream();
         return 1;

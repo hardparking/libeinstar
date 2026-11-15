@@ -36,13 +36,17 @@ struct DeviceInfo {
 // Lighting and exposure for scanning. Defaults are values EXStar used while
 // scanning (observed in its logs) and light the IR speckle on hardware.
 struct ScanSettings {
-  std::uint16_t strobe_route0 = 1000;
-  std::uint16_t strobe_route1 = 300;
-  std::uint8_t laser_percent = 100;
+  // Route 0 = IR flood LED, route 1 = visible white LED, laser = IR speckle
+  // projector (measured). Values and the 3:1 trigger ratio follow EXStar's
+  // logs on a V2.10 unit (it adapts route 0 between 3000 and 10000).
+  std::uint16_t strobe_route0 = 3000;
+  std::uint16_t strobe_route1 = 400;
+  std::uint8_t laser_percent = 60;
   std::uint32_t ir_exposure_us = 4000;
   std::uint16_t ir_gain = 105;
   std::uint32_t color_exposure_us = 5000;
   std::uint16_t color_gain = 180;
+  unsigned mono_triggers = 3, rgb_triggers = 1;  // per trigger cycle, passed to start_scanning
 };
 
 struct OpenOptions {
@@ -104,9 +108,9 @@ class Device {
   // Mirrors the vendor TriggerMode sequence: trigger period 200000, then the
   // packed counts (opcode 0x41), then a 1 s settle when RGB is disabled.
   Status set_trigger_counts(unsigned mono, unsigned rgb);
-  // EXStar's scan start: one IR and one colour frame per trigger, period
-  // 90000 (likely microseconds, ~11 Hz). Requires allow_writes.
-  Status start_scanning(std::uint32_t trigger_period = 90000);
+  // Scan start: `mono` IR and `rgb` colour frames per trigger cycle (opcode
+  // 0x41), period 90000 (likely microseconds, ~11 Hz). Requires allow_writes.
+  Status start_scanning(std::uint32_t trigger_period = 90000, unsigned mono = 1, unsigned rgb = 1);
   Status stop_scanning();
   // Exposure, gain and lighting for all cameras; lights_off() sets the
   // strobe routes and laser back to 0.
