@@ -3,8 +3,10 @@
 //   einstar-rgbd OUT_DIR [--calib FILE] [--seconds N]        live from the scanner
 //   einstar-rgbd OUT_DIR --calib FILE --replay FRAME_DIR     einstar-probe / EINSTAR_RECORD_DIR captures
 //
-// --backend auto|cpu|metal picks the stereo matcher (default auto: Metal on
-// Apple silicon); all give the same depth.
+// --backend auto|cpu|metal|cuda picks the stereo matcher (default auto: Metal
+// on Apple silicon, Cuda when built with EINSTAR_WITH_CUDA and a device is
+// usable, else cpu). cpu and metal give the same depth; cuda (libSGM) is a
+// different matcher and gives similar depth.
 // Depth options (defaults as in DepthParams): --min-depth-mm N, --max-depth-mm N,
 // --scale S and --single-pass (match only at stretch 1). Matching dominates the
 // cost and grows with the depth window; on a memory-bound desktop (i7-4790K)
@@ -236,7 +238,7 @@ int main(int argc, char** argv) {
   if (out.empty() || (!replay_dir.empty() && calib_path.empty())) {
     std::fprintf(stderr,
                  "usage: %s OUT_DIR [--calib FILE] [--seconds N] | OUT_DIR --calib FILE --replay FRAME_DIR\n"
-                 "       depth: [--backend auto|cpu|metal] [--min-depth-mm N] [--max-depth-mm N] [--scale S] [--single-pass]\n",
+                 "       depth: [--backend auto|cpu|metal|cuda] [--min-depth-mm N] [--max-depth-mm N] [--scale S] [--single-pass]\n",
                  argv[0]);
     return 2;
   }

@@ -9,6 +9,7 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -16,6 +17,10 @@
 #include "einstar/calibration.hpp"
 
 namespace einstar {
+
+namespace detail {
+class GpuMatcher;
+}
 
 // OpenCV forms of a camera's intrinsics (CV_64F, 3x3 and 1x5).
 cv::Mat camera_matrix(const CameraIntrinsics& in);
@@ -31,17 +36,20 @@ cv::Mat color_in_calibration_orientation(const cv::Mat& raw_bayer);
 
 // Stereo matcher behind StereoDepth. Metal (Apple GPUs) reproduces the CPU
 // matcher (OpenCV's StereoSGBM) bit for bit, so depth does not depend on
-// the choice. Auto picks Metal when available, else Cpu; it uses the CPU
-// for windows Metal does not support (over 1024 disparities) and for good
-// after a Metal failure.
-enum class MatchBackend { Auto, Cpu, Metal };
+// the choice between them. Cuda (libSGM, built with EINSTAR_WITH_CUDA) is a
+// different algorithm (census cost, its own penalties; see
+// DepthParams::cuda_p1) and gives similar but not identical depth. Auto
+// picks Cuda or Metal when built in and a device is usable, else Cpu; it
+// uses the CPU for windows Metal does not support (over 1024 disparities)
+// and for good after a GPU failure.
+enum class MatchBackend { Auto, Cpu, Metal, Cuda };
 
 // Whether a backend can run here: built in and, for GPUs, a device present.
 // Auto and Cpu always can.
 bool backend_available(MatchBackend backend);
 // The concrete backends (not Auto) that can run here, Cpu first.
 std::vector<MatchBackend> available_backends();
-// "auto", "cpu", "metal", and back.
+// "auto", "cpu", "metal", "cuda", and back.
 const char* to_string(MatchBackend backend);
 std::optional<MatchBackend> parse_match_backend(std::string_view name);
 
@@ -86,6 +94,12 @@ struct DepthParams {
   // Metal matched one stretch of a real frame at scale 0.5 in ~35 ms against
   // ~65 ms on the CPU (Apple M5 Pro).
   MatchBackend backend = MatchBackend::Auto;
+  // Cuda only: libSGM compares 9x7 census transforms, so its smoothness
+  // penalties are in census bits, not SGBM's intensity units (block_size,
+  // p1_factor and p2_factor do not apply); uniqueness and speckle filtering
+  // carry over.
+  int cuda_p1 = 8;
+  int cuda_p2 = 80;
 };
 
 class StereoDepth {
@@ -135,6 +149,7 @@ class StereoDepth {
   cv::Mat K_l_, D_l_, R1_, P1_, K_r_, D_r_, R2_, P2_;  // full-resolution rectification, for marker points
   cv::Matx33d R_rect_to_color_;
   cv::Vec3d T_rect_to_color_;
+  std::shared_ptr<detail::GpuMatcher> gpu_;  // libSGM matcher, set when the Cuda backend is in use
 };
 
 }  // namespace einstar

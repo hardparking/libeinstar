@@ -21,6 +21,7 @@ if(APPLE)
 else()
   set(EINSTAR_WITH_METAL OFF)
 endif()
+option(EINSTAR_WITH_CUDA "Stereo matching on a CUDA GPU with libSGM (MatchBackend::Cuda)" OFF)
 
 find_path(LIBUSB_INCLUDE_DIR libusb.h PATH_SUFFIXES libusb-1.0 REQUIRED)
 find_library(LIBUSB_LIBRARY NAMES usb-1.0 libusb-1.0 REQUIRED)
@@ -79,6 +80,22 @@ if(EINSTAR_WITH_OPENCV)
     add_library(einstar::depth ALIAS einstar_depth)
     list(APPEND EINSTAR_EXPORTED_TARGETS einstar_depth)
     set(EINSTAR_HAS_DEPTH ON)
+    if(EINSTAR_WITH_CUDA)
+      # libSGM (https://github.com/fixstars/libSGM), installed under
+      # LIBSGM_ROOT and built for this GPU's architecture.
+      find_package(CUDAToolkit REQUIRED)
+      find_path(LIBSGM_INCLUDE_DIR libsgm.h HINTS ${LIBSGM_ROOT} PATH_SUFFIXES include REQUIRED)
+      find_library(LIBSGM_LIBRARY sgm HINTS ${LIBSGM_ROOT} PATH_SUFFIXES lib lib64 REQUIRED)
+      target_sources(einstar_depth PRIVATE src/depth_gpu.cpp)
+      target_compile_definitions(einstar_depth PRIVATE EINSTAR_WITH_CUDA)
+      target_include_directories(einstar_depth SYSTEM PRIVATE ${LIBSGM_INCLUDE_DIR})
+      # einstar_depth is a static library, so its private link dependencies
+      # are exported with it: ${LIBSGM_LIBRARY} is recorded in
+      # einstarTargets.cmake as the absolute path found here (the installed
+      # package then needs libSGM at that path), and CUDA::cudart is found
+      # again through find_dependency(CUDAToolkit) in einstarConfig.cmake.
+      target_link_libraries(einstar_depth PRIVATE ${LIBSGM_LIBRARY} CUDA::cudart)
+    endif()
   else()
     message(STATUS "OpenCV not found: einstar::depth disabled")
   endif()

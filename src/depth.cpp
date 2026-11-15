@@ -15,6 +15,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef EINSTAR_WITH_CUDA
+#include "depth_gpu.hpp"
+#endif
+
 namespace einstar {
 
 cv::Mat camera_matrix(const CameraIntrinsics& in) {
@@ -34,12 +38,21 @@ cv::Mat to_calibration_orientation(const cv::Mat& image, unsigned stream_camera)
 }
 
 bool backend_available(MatchBackend backend) {
-  return backend != MatchBackend::Metal || detail::sgbm_metal_available();
+  switch (backend) {
+    case MatchBackend::Metal: return detail::sgbm_metal_available();
+    case MatchBackend::Cuda:
+#ifdef EINSTAR_WITH_CUDA
+      return detail::cuda_device_available();
+#else
+      return false;
+#endif
+    default: return true;
+  }
 }
 
 std::vector<MatchBackend> available_backends() {
   std::vector<MatchBackend> out;
-  for (MatchBackend b : {MatchBackend::Cpu, MatchBackend::Metal})
+  for (MatchBackend b : {MatchBackend::Cpu, MatchBackend::Metal, MatchBackend::Cuda})
     if (backend_available(b)) out.push_back(b);
   return out;
 }
@@ -49,12 +62,13 @@ const char* to_string(MatchBackend backend) {
     case MatchBackend::Auto: return "auto";
     case MatchBackend::Cpu: return "cpu";
     case MatchBackend::Metal: return "metal";
+    case MatchBackend::Cuda: return "cuda";
   }
   return "?";
 }
 
 std::optional<MatchBackend> parse_match_backend(std::string_view name) {
-  for (MatchBackend b : {MatchBackend::Auto, MatchBackend::Cpu, MatchBackend::Metal})
+  for (MatchBackend b : {MatchBackend::Auto, MatchBackend::Cpu, MatchBackend::Metal, MatchBackend::Cuda})
     if (name == to_string(b)) return b;
   return std::nullopt;
 }
@@ -118,7 +132,24 @@ std::pair<int, int> stretch_window(double k, double last_u, int min_disp, int nu
 // and `r` by num_disp + pad_r columns on the left, with pad_l - pad_r =
 // -min_disp, and search [0, num_disp). The SGBM border then falls in the
 // padding.
-cv::Mat match(const cv::Mat& l, const cv::Mat& r, int min_disp, int num_disp, const DepthParams& p) {
+cv::Mat match(const cv::Mat& l, const cv::Mat& r, int min_disp, int num_disp, const DepthParams& p,
+              detail::GpuMatcher* cuda) {
+#ifdef EINSTAR_WITH_CUDA
+  // libSGM (Cuda) takes any window and does its own padding. As with Metal,
+  // Auto uses the CPU for good after a failure.
+  static std::atomic<bool> cuda_failed{false};
+  if (cuda && p.backend == MatchBackend::Cuda) return cuda->match(l, r, min_disp, num_disp, p);
+  if (cuda && !cuda_failed) {
+    try {
+      return cuda->match(l, r, min_disp, num_disp, p);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "einstar: CUDA matching failed, using the CPU: %s\n", e.what());
+      cuda_failed = true;
+    }
+  }
+#else
+  (void)cuda;
+#endif
   const int pad_l = std::max(0, -min_disp), pad_r = std::max(0, min_disp);
   const int width = std::max(l.cols, r.cols) + num_disp + std::max(pad_l, pad_r);
   cv::Mat lpad, rpad;
@@ -158,6 +189,11 @@ StereoDepth::StereoDepth(const CameraModel& model, cv::Size size, DepthParams pa
     : size_(size), params_(params) {
   if (!backend_available(params.backend))
     throw std::invalid_argument(std::string("stereo matching backend not available: ") + to_string(params.backend));
+#ifdef EINSTAR_WITH_CUDA
+  // Auto uses Cuda whenever a device is usable.
+  if (params.backend == MatchBackend::Cuda || (params.backend == MatchBackend::Auto && backend_available(MatchBackend::Cuda)))
+    gpu_ = std::make_shared<detail::GpuMatcher>();
+#endif
   // Pick the geometric left IR camera: OpenCV's horizontal rectification
   // expects the second camera at negative x in the first camera's frame.
   const bool swap = model.relative(kIrLeftCamera, kIrRightCamera).T[0] > 0;
@@ -191,7 +227,7 @@ StereoDepth::StereoDepth(const CameraModel& model, cv::Size size, DepthParams pa
   P2.at<double>(0, 3) = -f * baseline_mm_;
   K_l_ = camera_matrix(l), D_l_ = distortion_coeffs(l), R1_ = R1.clone(), P1_ = P1.clone();
   K_r_ = camera_matrix(r), D_r_ = distortion_coeffs(r), R2_ = R2.clone(), P2_ = P2.clone();
-  scaled_ =cv::Size(static_cast<int>(std::ceil(std::max(view_l.width, view_r.width) * params.scale)),
+  scaled_ = cv::Size(static_cast<int>(std::ceil(std::max(view_l.width, view_r.width) * params.scale)),
                      static_cast<int>(std::ceil((bottom - top) * params.scale)));
   // Rectify straight into the scaled image by scaling the projection rows.
   cv::Mat P1s = P1.clone(), P2s = P2.clone();
@@ -257,7 +293,7 @@ cv::Mat StereoDepth::disparity(const cv::Mat& lr, const cv::Mat& rr) const {
     // Column u matching right column ur sits at k*ur in the stretched image,
     // so the search runs over u - k*ur = (1 - k)*u + k*d for d in the window.
     const auto [min_k, num_k] = stretch_window(k, last_u, min_disp_, num_disp_);
-    const cv::Mat dk = match(le, rk, min_k, num_k, params_);
+    const cv::Mat dk = match(le, rk, min_k, num_k, params_, gpu_.get());
     // Keep a match only where earlier stretches found nothing, both pixels
     // sample inside their source images, and the depth is in range.
     for (int v = 0; v < d.rows; ++v) {
