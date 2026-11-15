@@ -1,5 +1,6 @@
 #include "einstar/calibration.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -28,14 +29,37 @@ constexpr std::size_t kCameraOffsets[3] = {4, 38, 60};
 
 // CCF field order: fx fy 0 0 cx cy 0 0 d5 0 k1 k2 p1 p2 k3 0 0 0 0 0 T(3) R(9).
 constexpr std::size_t kCcfFields = 32;
-// Offsets added to LeftCCF/RightCCF fields (identical for both files and
-// recovered by comparison with an EXStar .data_cm of the same scanner).
-constexpr double kCcfIrKey[kCcfFields] = {5, -7, 0, 0, 8, -3, 0, 0, 5, 0, 1, 0, 11, 9, 13, 0,
-                                          0, 0, 0, 0, 1, -10, -1, -7, -6, -10, -1, 14, -3, -15, -11, -4};
+// LeftCCF/RightCCF store 33 float64 fields followed by 64 int32 key words
+// (TexCCF has no words). The key differs per scanner. EXStar
+// (Sn3DCalibrateData) combines the two files' words, word i = left[i] +/-
+// right[i] by kCcfKeyCombine, and offsets 22 fields of both IR cameras by
+// combined words: true value = stored value + sign * combined[word].
+constexpr std::size_t kCcfKeyOffset = 33 * 8, kCcfKeyWords = 64;
+constexpr char kCcfKeyCombine[kCcfKeyWords + 1] = "++-----++++----+++++----+-+++-+-++-+-+-++-+-+--+++-+-++-+++++---";
+struct CcfKeyUse {
+  std::uint8_t field, word;
+  std::int8_t sign;
+};
+constexpr CcfKeyUse kCcfKeyUse[] = {
+    {0, 0, -1},    {1, 1, +1},    {4, 2, +1},    {5, 3, -1},    {8, 4, -1},    {10, 5, -1},
+    {11, 6, +1},   {12, 7, -1},   {13, 8, -1},   {14, 9, -1},   {20, 50, +1},  {21, 51, +1},
+    {22, 52, +1},  {23, 33, +1},  {24, 34, -1},  {25, 35, +1},  {26, 36, -1},  {27, 37, -1},
+    {28, 38, -1},  {29, 39, +1},  {30, 40, +1},  {31, 41, +1}};
 
-CameraCalibration read_ccf(ByteView b, bool ir) {
+// Per-field corrections added to both IR cameras' stored fields.
+std::array<double, kCcfFields> ccf_ir_correction(ByteView left, ByteView right) {
+  std::array<double, kCcfFields> d{};
+  for (const auto& u : kCcfKeyUse) {
+    const std::int32_t l = le_i32(left, kCcfKeyOffset + 4 * u.word), r = le_i32(right, kCcfKeyOffset + 4 * u.word);
+    const double word = kCcfKeyCombine[u.word] == '+' ? double(l) + r : double(l) - r;
+    d[u.field] = u.sign * word;
+  }
+  return d;
+}
+
+CameraCalibration read_ccf(ByteView b, const std::array<double, kCcfFields>* correction) {
   double f[kCcfFields];
-  for (std::size_t i = 0; i < kCcfFields; ++i) f[i] = le_double(b, i) - (ir ? kCcfIrKey[i] : 0.0);
+  for (std::size_t i = 0; i < kCcfFields; ++i) f[i] = le_double(b, i) + (correction ? (*correction)[i] : 0.0);
   CameraCalibration c;
   c.intrinsics.fx = f[0];
   c.intrinsics.fy = f[1];
@@ -151,9 +175,10 @@ CalibrationResult parse_exstar_ccf(ByteView tex, ByteView left, ByteView right) 
   if (tex.size() != kCcfColorSize || left.size() != kCcfIrSize || right.size() != kCcfIrSize)
     return {std::nullopt, CalibrationError::MissingFile};
   CameraModel m;
-  m.cameras[kColorCamera] = read_ccf(tex, false);
-  m.cameras[kIrLeftCamera] = read_ccf(left, true);
-  m.cameras[kIrRightCamera] = read_ccf(right, true);
+  const auto correction = ccf_ir_correction(left, right);
+  m.cameras[kColorCamera] = read_ccf(tex, nullptr);
+  m.cameras[kIrLeftCamera] = read_ccf(left, &correction);
+  m.cameras[kIrRightCamera] = read_ccf(right, &correction);
   for (const auto& c : m.cameras)
     if (!is_rotation(c.world_to_camera.R)) return {std::nullopt, CalibrationError::NotARotation};
   m.pair_translation = m.relative(kIrLeftCamera, kColorCamera).T;
