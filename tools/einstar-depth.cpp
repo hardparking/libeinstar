@@ -2,7 +2,7 @@
 //
 //   einstar-depth CALIB FRAME_DIR FRAME_ID [OUT_PREFIX]
 //                 [--scale S] [--block B] [--uniqueness U] [--speckle-window W]
-//                 [--min-depth MM] [--max-depth MM]
+//                 [--min-depth MM] [--max-depth MM] [--single-pass] [--gpu]
 //
 // Reads frame_<id>_cam{0,1,2}.pgm (einstar-probe --out), prints depth
 // coverage and range, and writes OUT_PREFIX_depth.png (colour-mapped),
@@ -31,6 +31,8 @@ int main(int argc, char** argv) {
     else if (a == "--speckle-window" && i + 1 < argc) params.speckle_window = std::atoi(argv[++i]);
     else if (a == "--min-depth" && i + 1 < argc) params.min_depth_mm = static_cast<float>(std::atof(argv[++i]));
     else if (a == "--max-depth" && i + 1 < argc) params.max_depth_mm = static_cast<float>(std::atof(argv[++i]));
+    else if (a == "--single-pass") params.stretches = {1.0};
+    else if (a == "--gpu") params.gpu = true;
     else pos.push_back(a);
   }
   if (pos.size() < 3) {

@@ -2,6 +2,7 @@
 
 #include <libusb.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -448,8 +449,8 @@ Status Device::set_trigger_counts(unsigned mono, unsigned rgb) {
   return Ok{};
 }
 
-Status Device::start_scanning(std::uint32_t trigger_period) {
-  if (Status s = set_trigger_counts(1, 1); !s) return s;
+Status Device::start_scanning(std::uint32_t trigger_period, unsigned mono, unsigned rgb) {
+  if (Status s = set_trigger_counts(mono, rgb); !s) return s;
   return set_trigger_period(trigger_period);
 }
 

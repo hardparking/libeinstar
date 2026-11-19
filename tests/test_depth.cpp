@@ -279,6 +279,29 @@ int main() {
     if (cov < 0.85 || cov < cov_plain + 0.15) { std::printf("FAIL slanted coverage\n"); ++failures; }
     if (err > 1.0) { std::printf("FAIL slanted depth\n"); ++failures; }
   }
+  // The same planes matched on the GPU (CUDA builds only), held to the same
+  // limits.
+  if (gpu_matching_available()) {
+    DepthParams gp;
+    gp.gpu = true;
+    const StereoDepth gsd(m, {W, H}, gp);
+    const cv::Mat gdepth = gsd.depth_in_color(left, right);
+    std::vector<float> gvals;
+    for (int v = H / 4; v < 3 * H / 4; ++v)
+      for (int u = u0; u < u1; ++u)
+        if (float d = gdepth.at<float>(v, u); d > 0) gvals.push_back(d);
+    const double gcov = gvals.size() / double((H / 2) * (u1 - u0));
+    std::nth_element(gvals.begin(), gvals.begin() + gvals.size() / 2, gvals.end());
+    const double gmed = gvals.empty() ? 0 : gvals[gvals.size() / 2];
+    const double slope = 1.2;
+    const auto [scov, serr] = slanted_stats(
+        gsd.depth_in_color(render_slanted(texture, 0, z, slope, texel), render_slanted(texture, -baseline, z, slope, texel)),
+        z, slope, W / 2, W - 16);
+    std::printf("gpu: coverage %.1f%%, median depth %.2f mm; slanted plane coverage %.1f%%, median |error| %.2f mm\n",
+                gcov * 100, gmed, scov * 100, serr);
+    if (gcov < 0.8 || std::abs(gmed - z) > 1.0) { std::printf("FAIL gpu plane\n"); ++failures; }
+    if (scov < 0.85 || serr > 1.0) { std::printf("FAIL gpu slanted plane\n"); ++failures; }
+  }
   if (const char* path = std::getenv("EINSTAR_CAMERA_MODEL")) failures += real_calibration_case(path, texture);
   std::printf(failures ? "FAIL\n" : "PASS\n");
   return failures ? 1 : 0;

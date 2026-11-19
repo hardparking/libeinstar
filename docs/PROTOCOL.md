@@ -244,10 +244,46 @@ relative to the calibration (`stream_orientation`). Debayer the colour stream
 back to the scanner's natural orientation and folds the turn into the camera
 model.
 
+## Findings from a second unit (firmware V2.10, Linux)
+
+These findings come from static analysis of EXStar's Windows build and from runtime
+logs of the same unit. The Windows modules are `Sn3DCalibrateData.dll`,
+`Sn3DEinStarController.dll` and the sync-service device plugin
+`einscan10.2.0.0.dll`. The emitter mapping is [obs]: it was measured by capturing
+with one source at a time.
+
+- **Emitters [obs].** Strobe route = LED id (`ledID` is copied into `ROUTEINDEX`).
+  Each source was captured alone, with fixed exposure:
+
+  | Source | Command | Lights | Seen by | Image |
+  |---|---|---|---|---|
+  | Route 0 | 0x70 | IR flood LED | IR cameras only | even illumination, no pattern |
+  | Route 1 | 0x70 | visible white LED | colour camera only | even illumination |
+  | `LDRGBLuminance` (the laser) | 0x68 | IR speckle projector | IR cameras only | dot pattern |
+
+  `LDRGBLuminance` is what EXStar's "laser brightness" control sets, in percent.
+  With every source off, all cameras read about 12–16 grey.
+- **EXStar runtime values on this unit [log].**
+  - Route 0 is adapted between 3000 and 10000.
+  - Route 1 is 400 (0 when idle).
+  - The laser is 60 or 100.
+  - `ScanTriggerPeriod` is 90000.
+  - `TriggerMode` is MONOTRIGCOUNT 3 and RGBTRIGCOUNT 1, so one colour frame per three IR triggers.
+  - The scan distance reported by EXStar is about 200–230 mm.
+- **System 0x07: status [der, obs].** Not in the tables above.
+  - EXStar polls it continuously as its connection check, so it is read-only.
+  - Wire size is 50 bytes.
+  - Reply bytes 9..11 are `BUTTON0..2`.
+  - Bytes 12..13 are the board temperature and bytes 14..15 the IR temperature, each BE16 / 100 = °C.
+  - EXStar decodes the temperatures only when a per-device feature flag is set. On this V2.10 unit they read 0 and 1, and the buttons read 0.
+- **CCF key [der, obs].** The key is per scanner and stored in the data itself.
+  - Each IR slot carries 64 int32 words after its 33 float64 fields.
+  - The left and right words are combined with a fixed sign pattern.
+  - The combined words are applied to 22 fields of both IR cameras. This is now implemented in `parse_exstar_ccf`.
+
 ## Open questions
 
-1. Whether other Einstar units use the same PID and whether any firmware enables the XOR mask (off here).
+1. Whether other Einstar units use the same PID and whether any firmware enables the XOR mask (off on both units).
 2. Stream header bytes 0..1 and the timestamp interpretation.
-3. Units of exposure (µs assumed), gain, trigger period and temperature (reads 0 while idle).
-4. Which strobe route drives which emitter, and the meaning of `LDRGBLuminance`.
-5. Whether the LeftCCF/RightCCF offset key is the same on every scanner.
+3. Units of exposure (µs assumed), gain and trigger period. Temperature: see system 0x07 above. The camera-group 0x50 value reads 0.
+4. Which feature flag enables the 0x07 temperature fields.

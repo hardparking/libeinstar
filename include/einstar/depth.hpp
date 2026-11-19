@@ -9,11 +9,16 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 
+#include <memory>
 #include <vector>
 
 #include "einstar/calibration.hpp"
 
 namespace einstar {
+
+namespace detail {
+class GpuMatcher;
+}
 
 // OpenCV forms of a camera's intrinsics (CV_64F, 3x3 and 1x5).
 cv::Mat camera_matrix(const CameraIntrinsics& in);
@@ -65,7 +70,17 @@ struct DepthParams {
   // stretch costs one more matching pass (65 -> 131 ms per frame at scale
   // 0.5 on Apple M-series).
   std::vector<double> stretches = {1.0, 0.6};
+  // Match on a CUDA GPU with libSGM instead of SGBM (needs a build with
+  // EINSTAR_WITH_CUDA; see gpu_matching_available()). libSGM compares 9x7
+  // census transforms, so its smoothness penalties are in census bits, not
+  // SGBM's intensity units; uniqueness and speckle filtering carry over.
+  bool gpu = false;
+  int gpu_p1 = 8;
+  int gpu_p2 = 80;
 };
+
+// Whether this build can match on the GPU (DepthParams::gpu).
+bool gpu_matching_available();
 
 class StereoDepth {
  public:
@@ -95,6 +110,10 @@ class StereoDepth {
   // from the images of calibration cameras kIrLeftCamera and kIrRightCamera.
   cv::Mat depth_in_color(const cv::Mat& ir_left, const cv::Mat& ir_right) const;
   cv::Mat undistort_color(const cv::Mat& bgr) const;
+  // Retro-reflective markers: bright round blobs found in both full-resolution
+  // IR images, matched along rectified rows and triangulated. Points are in
+  // millimetres in the undistorted colour frame, like depth_in_color.
+  std::vector<cv::Point3f> markers_in_color(const cv::Mat& ir_left, const cv::Mat& ir_right) const;
 
  private:
   cv::Size size_, scaled_;
@@ -105,8 +124,10 @@ class StereoDepth {
   cv::Mat map_l1_, map_l2_, map_r1_, map_r2_, map_c1_, map_c2_;
   cv::Mat mask_l_, mask_r_;
   cv::Mat color_K_;
+  cv::Mat K_l_, D_l_, R1_, P1_, K_r_, D_r_, R2_, P2_;  // full-resolution rectification, for marker points
   cv::Matx33d R_rect_to_color_;
   cv::Vec3d T_rect_to_color_;
+  std::shared_ptr<detail::GpuMatcher> gpu_;  // set when params.gpu
 };
 
 }  // namespace einstar

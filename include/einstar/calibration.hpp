@@ -93,7 +93,8 @@ CalibrationResult load_camera_model(const std::string& path);
 // EXStar's per-scanner calibration cache: TexCCF.txt, LeftCCF.txt and
 // RightCCF.txt (binary float64 despite the name), typically in
 // EXStar.app/Contents/Resources/res/Einscan-E10/200x150/. Left/Right values
-// carry a fixed integer offset per field, removed here; the result is
+// carry per-scanner integer offsets, derived from key words stored in the
+// Left/Right files themselves and removed here; the result is
 // rejected unless every rotation is orthonormal. Header and tail fields of
 // the .data_cm format are not available from these files.
 inline constexpr std::size_t kCcfColorSize = 264;

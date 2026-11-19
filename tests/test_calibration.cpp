@@ -108,6 +108,58 @@ TEST(exstar_ccf_cache_matches_camera_model_when_provided) {
   }
 }
 
+// IR fields are offset by key words stored in the Left/Right files; both IR
+// cameras share the combined words (left[i] +/- right[i]).
+TEST(ccf_ir_key_words_from_the_files_are_removed) {
+  const Mat3 rl = rot_y(0.17), rr = rot_y(-0.22);
+  const double true_left[33] = {1154.5, 1154.25, 0, 0, 645.5, 505.0, 0, 0, 1e-4, 0, -0.16, 0.17, 5e-5, 6e-5, 0.012, 0,
+                                0, 0, 0, 0, 64.0, -11.5, 199.5, rl[0], rl[1], rl[2], rl[3], rl[4], rl[5], rl[6],
+                                rl[7], rl[8], 0};
+  double true_right[33];
+  std::copy(true_left, true_left + 33, true_right);
+  true_right[20] = -21.5;
+  for (int i = 0; i < 9; ++i) true_right[23 + i] = rr[i];
+  const double tex[33] = {1152, 1152, 0, 0, 640, 512, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0};
+  // Key words: left 3*i - 40, right 17 - i; combined per word: "+" sums, "-" subtracts.
+  const char* combine = "++-----++++----+++++----+-+++-+-++-+-+-++-+-+--+++-+-++-+++++---";
+  auto combined = [&](int w) { return combine[w] == '+' ? (3 * w - 40) + (17 - w) : (3 * w - 40) - (17 - w); };
+  const int use[22][3] = {{0, 0, -1},   {1, 1, 1},    {4, 2, 1},    {5, 3, -1},   {8, 4, -1},   {10, 5, -1},
+                          {11, 6, 1},   {12, 7, -1},  {13, 8, -1},  {14, 9, -1},  {20, 50, 1},  {21, 51, 1},
+                          {22, 52, 1},  {23, 33, 1},  {24, 34, -1}, {25, 35, 1},  {26, 36, -1}, {27, 37, -1},
+                          {28, 38, -1}, {29, 39, 1},  {30, 40, 1},  {31, 41, 1}};
+  auto ir_file = [&](const double* truth, bool left) {
+    std::vector<std::uint8_t> b(kCcfIrSize, 0);
+    double stored[33];
+    std::copy(truth, truth + 33, stored);
+    for (const auto& u : use) stored[u[0]] = truth[u[0]] - u[2] * combined(u[1]);
+    for (int i = 0; i < 33; ++i) put_double(b, i, stored[i]);
+    for (int w = 0; w < 64; ++w) {
+      const std::int32_t v = left ? 3 * w - 40 : 17 - w;
+      std::memcpy(b.data() + 264 + 4 * w, &v, 4);  // little-endian host
+    }
+    return b;
+  };
+  std::vector<std::uint8_t> t(kCcfColorSize, 0);
+  for (int i = 0; i < 33; ++i) put_double(t, i, tex[i]);
+  auto r = parse_exstar_ccf(t, ir_file(true_left, true), ir_file(true_right, false));
+  CHECK(r.model.has_value());
+  if (!r.model) return;
+  using Truth = std::pair<unsigned, const double*>;
+  for (const auto& [cam, truth] : {Truth{kIrLeftCamera, true_left}, Truth{kIrRightCamera, true_right}}) {
+    const auto& c = r.model->cameras[cam];
+    CHECK_NEAR(c.intrinsics.fx, truth[0], 1e-9);
+    CHECK_NEAR(c.intrinsics.fy, truth[1], 1e-9);
+    CHECK_NEAR(c.intrinsics.cx, truth[4], 1e-9);
+    CHECK_NEAR(c.intrinsics.cy, truth[5], 1e-9);
+    CHECK_NEAR(c.intrinsics.distortion[5], truth[8], 1e-12);
+    for (int i = 0; i < 5; ++i) CHECK_NEAR(c.intrinsics.distortion[i], truth[10 + i], 1e-12);
+    for (int i = 0; i < 3; ++i) CHECK_NEAR(c.world_to_camera.T[i], truth[20 + i], 1e-9);
+    for (int i = 0; i < 9; ++i) CHECK_NEAR(c.world_to_camera.R[i], truth[23 + i], 1e-12);
+  }
+  CHECK_NEAR(r.model->cameras[kColorCamera].intrinsics.fx, 1152, 0.0);
+}
+
 TEST(ccf_with_wrong_sizes_is_rejected) {
   std::vector<std::uint8_t> small(10, 0);
   CHECK(parse_exstar_ccf(small, small, small).error == CalibrationError::MissingFile);
