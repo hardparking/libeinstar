@@ -19,6 +19,14 @@ than --max-depth-mm is used, so a still background does not hold the
 tracking when the object turns on a turntable. Frames that fail to align are
 not fused.
 
+Markers that einstar-rgbd found locate a frame against a map of all markers
+seen so far. When the predicted pose finds no match, the frame is searched
+in the whole map, so a track that slipped snaps back once known markers are
+in view. Only frames the markers located add to the map; a frame aligned by
+ICP alone could have slipped and would copy markers to the wrong place. An
+ICP alignment is also dropped when the frame disagrees with the surface the
+model already holds.
+
 With --follow the script processes frames as `einstar-rgbd FRAME_DIR` writes
 them and shows a preview: the colour view with the distance to the surface
 and the tracking state, next to the model so far seen from the scanner.
@@ -158,6 +166,45 @@ class MarkerMap:
                 res = np.linalg.norm(markers[ok] @ pose[:3, :3].T + pose[:3, 3] - self.points[j[ok]], axis=1)
         return pose if np.sqrt((res ** 2).mean()) <= self.max_rms else None
 
+    def relocate(self, markers, min_inliers=5, tol=0.0015, triples=20):
+        """Pose from the markers alone, without a predicted pose, or None.
+
+        After the track has slipped, the prediction `locate` needs is wrong.
+        Triples of frame markers are matched to map triples by their side
+        lengths and every match is scored by how many frame markers it puts
+        on a map marker. A regular grid of markers fits several poses about
+        equally well; then the markers do not fix the pose and None is
+        returned."""
+        known = self.points[self.counts >= 3]
+        if len(markers) < min_inliers or len(known) < min_inliers:
+            return None
+        dm = np.linalg.norm(known[:, None] - known[None], axis=2)
+        df = np.linalg.norm(markers[:, None] - markers[None], axis=2)
+        rng = np.random.default_rng(len(markers))
+        hyps = []
+        for _ in range(triples):
+            a, b, c = rng.choice(len(markers), 3, replace=False)
+            if min(df[a, b], df[b, c], df[c, a]) < 0.015:
+                continue  # a thin triangle barely fixes the rotation
+            k, l = np.nonzero(np.abs(dm - df[a, b]) < tol)
+            ok = (np.abs(dm[l] - df[b, c]) < tol) & (np.abs(dm[k] - df[c, a]) < tol)
+            for i, m in zip(*np.nonzero(ok)):
+                t = rigid_fit(markers[[a, b, c]], known[[k[i], l[i], m]])
+                world = markers @ t[:3, :3].T + t[:3, 3]
+                inl = (np.linalg.norm(world[:, None] - known[None], axis=2).min(1) < self.match_radius).sum()
+                if inl >= min_inliers:
+                    hyps.append((inl, t))
+        if not hyps:
+            return None
+        hyps.sort(key=lambda h: -h[0])
+        best_n, best = hyps[0]
+        centre = markers.mean(0)
+        for n, t in hyps[1:]:
+            # another pose that explains nearly as many markers: ambiguous
+            if n >= 0.8 * best_n and np.linalg.norm(t[:3, :3] @ centre + t[:3, 3] - best[:3, :3] @ centre - best[:3, 3]) > 0.005:
+                return None
+        return self.locate(markers, best)
+
     def add(self, markers, pose):
         """Average matched markers into the map and add new ones."""
         world = markers @ pose[:3, :3].T + pose[:3, 3]
@@ -264,6 +311,27 @@ def main():
     def cloud(depth_img):
         return o3d.t.geometry.PointCloud.create_from_depth_image(depth_img, K, I4, DEPTH_SCALE, max_depth, 2)
 
+    check = o3d.t.pipelines.slam.Frame(height, width, K, dev)
+
+    def agrees_with_model(depth_img, p, tol=0.005, min_overlap=0.2, min_agree=0.6):
+        """Whether a frame at pose p sees the surface the model already holds.
+
+        ICP that slipped still fits its own reference, but then the frame
+        disagrees with the model fused so far: the surfaces lie apart where
+        both see something. A frame that mostly sees new surface cannot be
+        checked and passes."""
+        if fused < 10:
+            return True
+        model.update_frame_pose(fused, o3c.Tensor(p))
+        model.synthesize_model_frame(check, DEPTH_SCALE, DEPTH_MIN, max_depth, trunc, False)
+        d = depth_img.as_tensor().numpy()[:, :, 0].astype(np.float32) / DEPTH_SCALE
+        r = check.get_data_as_image('depth').as_tensor().numpy()[:, :, 0].astype(np.float32) / DEPTH_SCALE
+        seen = (d > 0) & (d <= max_depth)
+        both = seen & (r > 0)
+        if both.sum() < min_overlap * seen.sum():
+            return True
+        return (np.abs(d[both] - r[both]) < tol).mean() >= min_agree
+
     def align(src, tgt, guess):
         """ICP result, or None when there is too little overlap or ICP fails (singular system)."""
         if len(src.point.positions) < 500 or len(tgt.point.positions) < 500:
@@ -279,7 +347,7 @@ def main():
 
     keyframe, keyframe_pose = None, np.eye(4)
     marker_map = MarkerMap()
-    prev_pose, n_marker_frames = np.eye(4), 0
+    prev_pose, n_marker_frames, n_relocated, n_rejected = np.eye(4), 0, 0, 0
     kf_clouds, kf_poses = [], []
     fused_frames = []  # (depth path, keyframe index, pose relative to that keyframe)
     poses, n_lost, fused, index = [], 0, 0, 0
@@ -302,33 +370,46 @@ def main():
             depth = o3d.t.io.read_image(path)
             frame.set_data_from_image('depth', depth)
             frame.set_data_from_image('color', o3d.t.io.read_image(path.replace('/d_', '/c_')))
-            aligned = fused == 0
+            src = cloud(depth)
+            empty = src.is_empty()  # no depth in range: nothing to align or fuse
+            aligned = fused == 0 and not empty
             new_keyframe = keyframe is None
             markers = np.zeros((0, 3)) if args.no_markers else read_markers(path)
-            by_markers = False
+            by_markers = relocated = False
             if fused > 0 and len(markers):
                 # constant-velocity guess from the last two poses
                 m = marker_map.locate(markers, pose @ np.linalg.inv(prev_pose) @ pose)
+                if m is None:
+                    # the prediction may be off because the track slipped: look in the whole map
+                    m = marker_map.relocate(markers)
+                    relocated = m is not None
                 if m is not None:
                     pose, aligned, by_markers = m, True, True
                     n_marker_frames += 1
-                    new_keyframe = n_marker_frames % 10 == 0  # keep the ICP fallback's reference fresh
-            if fused > 0 and not aligned:
-                src = cloud(depth).voxel_down_sample(0.002)
+                    n_relocated += relocated
+                    new_keyframe = relocated or n_marker_frames % 10 == 0  # keep the ICP fallback's reference fresh
+            if fused > 0 and not aligned and not empty:
+                src = src.voxel_down_sample(0.002)
                 if args.track == 'keyframe':
                     # guess: the previous pose, relative to the keyframe
                     r = align(src, keyframe, np.linalg.inv(keyframe_pose) @ pose)
                     if r is not None:
-                        pose = keyframe_pose @ r.transformation.numpy()
-                        aligned = True
-                        new_keyframe = r.fitness < args.keyframe_fitness
+                        p = keyframe_pose @ r.transformation.numpy()
+                        if agrees_with_model(depth, p):
+                            pose, aligned = p, True
+                            new_keyframe = r.fitness < args.keyframe_fitness
+                        else:
+                            n_rejected += 1
                 if not aligned:
                     r = align(src, cloud(ray.get_data_as_image('depth')), np.eye(4))  # raycast depth is in input units
                     if r is not None:
-                        pose = pose @ r.transformation.numpy()
-                        aligned = True
-                        new_keyframe = args.track == 'keyframe'
-            if aligned and new_keyframe:
+                        p = pose @ r.transformation.numpy()
+                        if agrees_with_model(depth, p):
+                            pose, aligned = p, True
+                            new_keyframe = args.track == 'keyframe'
+                        else:
+                            n_rejected += 1
+            if aligned and new_keyframe and not empty:
                 keyframe, keyframe_pose = cloud(depth).voxel_down_sample(0.0015), pose.copy()
                 kf_clouds.append(keyframe)
                 kf_poses.append(keyframe_pose)
@@ -337,10 +418,14 @@ def main():
                 model.integrate(frame, DEPTH_SCALE, max_depth, trunc)
                 model.synthesize_model_frame(ray, DEPTH_SCALE, DEPTH_MIN, max_depth, trunc, False)
                 fused += 1
-                prev_pose = poses[-1] if poses else pose.copy()
+                prev_pose = poses[-1] if poses and not (by_markers and relocated) else pose.copy()
                 poses.append(pose.copy())
                 fused_frames.append((path, len(kf_poses) - 1, np.linalg.inv(keyframe_pose) @ pose))
-                if len(markers):
+                # A frame aligned by ICP alone may have slipped; its markers would
+                # enter the map at the wrong place and a later frame could lock
+                # onto that copy. So only frames the markers located extend the
+                # map, apart from the frames before the first such frame.
+                if len(markers) and (by_markers or n_marker_frames == 0):
                     marker_map.add(markers, pose)
                 status = 'tracking (markers)' if by_markers else 'tracking'
             else:
@@ -362,7 +447,10 @@ def main():
     if fused == 0:
         sys.exit('no frames fused')
     if n_marker_frames:
-        print(f'markers: {n_marker_frames} of {fused} frames located by markers, {len(marker_map.points)} in the map')
+        print(f'markers: {n_marker_frames} of {fused} frames located by markers ({n_relocated} found again '
+              f'without a prediction), {len(marker_map.points)} in the map')
+    if n_rejected:
+        print(f'{n_rejected} ICP alignments rejected: they disagreed with the model')
     # markers already tie every frame to one global map; the pose graph is for marker-less scans
     if args.track == 'keyframe' and not args.no_loop_closure and len(kf_poses) >= 3 and n_marker_frames < fused / 2:
         t1 = time.time()
