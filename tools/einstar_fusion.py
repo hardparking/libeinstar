@@ -27,6 +27,13 @@ ICP alone could have slipped and would copy markers to the wrong place. An
 ICP alignment is also dropped when the frame disagrees with the surface the
 model already holds.
 
+With --turntable the object turns on a turntable with markers on it while
+the scanner stands still. The room then does not move with the object and
+must not be fused: the frames are tracked by the markers alone, the camera's
+circle around the object gives the turntable's axis, and only depth near
+the axis and above the turntable is fused. That needs the whole scan, so it
+does not work with --follow.
+
 With --follow the script processes frames as `einstar-rgbd FRAME_DIR` writes
 them and shows a preview: the colour view with the distance to the surface
 and the tracking state, next to the model so far seen from the scanner.
@@ -265,6 +272,25 @@ def close_loops(clouds, poses, max_corr, max_angle_deg=60, max_shift=0.15, min_f
     return [np.asarray(n.pose) for n in graph.nodes], loops
 
 
+def turntable_axis(poses):
+    """A point on the turntable's axis and its direction (up), from camera poses in object coordinates.
+
+    The object turns under a still camera, so in object coordinates the
+    camera circles the axis: the axis is the normal of the circle through the
+    camera positions, through its centre. None when the scan covers too
+    little of a turn to tell."""
+    c = np.array([p[:3, 3] for p in poses])
+    mid = c.mean(0)
+    _, s, vt = np.linalg.svd(c - mid)
+    if s[1] < 0.3 * s[0]:
+        return None
+    axis = vt[2] if np.mean([p[:3, 2] for p in poses], axis=0) @ vt[2] < 0 else -vt[2]  # the camera looks down
+    xy = np.c_[(c - mid) @ vt[0], (c - mid) @ vt[1]]
+    # circle |x - o|^2 = r^2, linear in o and r^2 - |o|^2
+    o = np.linalg.lstsq(np.c_[2 * xy, np.ones(len(xy))], (xy ** 2).sum(1), rcond=None)[0]
+    return mid + o[0] * vt[0] + o[1] * vt[1], axis
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('frame_dir')
@@ -282,7 +308,16 @@ def main():
                     help='skip the final pose-graph optimisation over keyframes (keyframe tracking only)')
     ap.add_argument('--no-markers', action='store_true',
                     help='ignore the retro-reflective markers einstar-rgbd found (m_NNNNN.txt)')
+    ap.add_argument('--turntable', action='store_true',
+                    help='the object turns on a turntable with markers on it, the scanner stands still; '
+                         'keeps only what turns (not with --follow)')
+    ap.add_argument('--turntable-radius-mm', type=float, default=150,
+                    help='with --turntable, keep depth within this distance of the axis (default 150)')
+    ap.add_argument('--plate-clearance-mm', type=float, default=3,
+                    help='with --turntable, drop depth up to this far above the turntable (default 3)')
     args = ap.parse_args()
+    if args.turntable and (args.follow or args.no_markers):
+        sys.exit('--turntable needs markers and the whole scan: it cannot be used with --follow or --no-markers')
 
     frame_dir = args.frame_dir
     out = args.out or os.path.join(frame_dir, 'scan')
@@ -344,6 +379,9 @@ def main():
         except RuntimeError:
             return None
         return r if r.fitness >= MIN_FITNESS else None
+
+    if args.turntable:
+        return fuse_turntable(args, frame_dir, out, max_depth, model, frame, cloud, (fx, fy, cx, cy, width, height), trunc)
 
     keyframe, keyframe_pose = None, np.eye(4)
     marker_map = MarkerMap()
@@ -471,6 +509,82 @@ def main():
     np.savetxt(out + '_poses.txt', np.array(poses).reshape(len(poses), 16))
     print(f'{index} frames: fused {fused}, not aligned {n_lost}; {len(mesh.triangles)} triangles -> {out}_mesh.ply '
           f'({time.time() - t0:.0f} s)')
+
+
+def fuse_turntable(args, frame_dir, out, max_depth, model, frame, cloud, intrinsics, trunc):
+    """Turntable scan: markers track the object, then only what turns is fused.
+
+    The room stands still while the object turns, so depth of the room
+    cannot be fused at the markers' poses. The first pass tracks every frame
+    by the markers alone; the camera positions then give the turntable's
+    axis (see turntable_axis) and the top of the turntable is the height,
+    along the axis, at which most of the seen surface lies. The second pass
+    fuses only depth within --turntable-radius-mm of the axis and above the
+    turntable."""
+    t0 = time.time()
+    marker_map = MarkerMap()
+    tracked = []  # (depth path, pose)
+    pose = prev_pose = np.eye(4)
+    index = 0
+    for path in frame_paths(frame_dir, 0):
+        index += 1
+        markers = read_markers(path)
+        if len(markers) < marker_map.min_markers:
+            continue
+        if tracked:
+            m = marker_map.locate(markers, pose @ np.linalg.inv(prev_pose) @ pose)
+            if m is None:
+                m = marker_map.relocate(markers)
+            if m is None:
+                continue
+            prev_pose, pose = pose, m
+        tracked.append((path, pose))
+        marker_map.add(markers, pose)
+    print(f'turntable: {len(tracked)} of {index} frames located by markers, {len(marker_map.points)} in the map')
+    found = turntable_axis([p for _, p in tracked]) if len(tracked) >= 10 else None
+    if found is None:
+        sys.exit('turntable: the markers do not show the object turning (too few frames located, or too little of a turn)')
+    centre, axis = found
+    radius = args.turntable_radius_mm / 1000
+
+    def height_radial(points):
+        w = points - centre
+        h = w @ axis
+        return h, np.linalg.norm(w - h[:, None] * axis, axis=1)
+
+    hs = []
+    for path, p in tracked[::5]:
+        pts = cloud(o3d.t.io.read_image(path)).point.positions.numpy() @ p[:3, :3].T + p[:3, 3]
+        h, r = height_radial(pts)
+        hs.append(h[r < radius])
+    hs = np.concatenate(hs)
+    counts, edges = np.histogram(hs, bins=np.arange(hs.min(), hs.max() + 0.002, 0.002))
+    top = edges[counts.argmax() + 1]  # the turntable is the flattest, most seen surface
+    cut = top + args.plate_clearance_mm / 1000
+    print(f'turntable: axis through {np.round(centre * 1000)} mm, top at {top * 1000:.0f} mm along it')
+
+    fx, fy, cx, cy, width, height = intrinsics
+    u, v = np.meshgrid(np.arange(width), np.arange(height))
+    rays = np.dstack(((u - cx) / fx, (v - cy) / fy, np.ones((height, width))))
+    poses, fused = [], 0
+    for path, p in tracked:
+        raw = o3d.t.io.read_image(path).as_tensor().numpy()
+        pts = (raw[:, :, 0, None] / DEPTH_SCALE * rays).reshape(-1, 3) @ p[:3, :3].T + p[:3, 3]
+        h, r = height_radial(pts)
+        keep = ((raw[:, :, 0] > 0).ravel() & (h > cut) & (r < radius)).reshape(height, width)
+        if keep.sum() < 100:
+            continue
+        frame.set_data_from_image('depth', o3d.t.geometry.Image(o3c.Tensor(np.ascontiguousarray(
+            np.where(keep[:, :, None], raw, 0)))))
+        frame.set_data_from_image('color', o3d.t.io.read_image(path.replace('/d_', '/c_')))
+        model.update_frame_pose(fused, o3c.Tensor(p))
+        model.integrate(frame, DEPTH_SCALE, max_depth, trunc)
+        poses.append(p)
+        fused += 1
+    mesh = model.voxel_grid.extract_triangle_mesh().to_legacy()
+    o3d.io.write_triangle_mesh(out + '_mesh.ply', mesh)
+    np.savetxt(out + '_poses.txt', np.array(poses).reshape(len(poses), 16))
+    print(f'{index} frames: fused {fused}; {len(mesh.triangles)} triangles -> {out}_mesh.ply ({time.time() - t0:.0f} s)')
 
 
 if __name__ == '__main__':
