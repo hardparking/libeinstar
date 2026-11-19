@@ -272,6 +272,21 @@ def close_loops(clouds, poses, max_corr, max_angle_deg=60, max_shift=0.15, min_f
     return [np.asarray(n.pose) for n in graph.nodes], loops
 
 
+def drop_small_parts(mesh, min_part):
+    """Remove connected parts with fewer than min_part times the largest part's triangles.
+
+    Stray depth (glints, edges, a hand) fuses into small floating pieces
+    apart from the scanned surface. Returns the number of parts removed."""
+    if min_part <= 0 or not len(mesh.triangles):
+        return 0
+    part, sizes, _ = mesh.cluster_connected_triangles()
+    part, sizes = np.asarray(part), np.asarray(sizes)
+    small = sizes < min_part * sizes.max()
+    mesh.remove_triangles_by_mask(small[part])
+    mesh.remove_unreferenced_vertices()
+    return int(small.sum())
+
+
 def turntable_axis(poses):
     """A point on the turntable's axis and its direction (up), from camera poses in object coordinates.
 
@@ -313,6 +328,9 @@ def main():
                          'keeps only what turns (not with --follow)')
     ap.add_argument('--turntable-radius-mm', type=float, default=150,
                     help='with --turntable, keep depth within this distance of the axis (default 150)')
+    ap.add_argument('--min-part', type=float,
+                    help='drop mesh parts with fewer triangles than this share of the largest part '
+                         '(default 0.05 with --turntable, else 0.01; 0 keeps all)')
     ap.add_argument('--plate-clearance-mm', type=float, default=3,
                     help='with --turntable, drop depth up to this far above the turntable (default 3)')
     args = ap.parse_args()
@@ -505,6 +523,9 @@ def main():
             poses.append(pose)
         print(f'loop closure: {len(kf_poses)} keyframes, {loops} extra links ({time.time() - t1:.0f} s)')
     mesh = model.voxel_grid.extract_triangle_mesh().to_legacy()
+    dropped = drop_small_parts(mesh, args.min_part if args.min_part is not None else 0.05 if args.turntable else 0.01)
+    if dropped:
+        print(f'dropped {dropped} small parts of the mesh')
     o3d.io.write_triangle_mesh(out + '_mesh.ply', mesh)
     np.savetxt(out + '_poses.txt', np.array(poses).reshape(len(poses), 16))
     print(f'{index} frames: fused {fused}, not aligned {n_lost}; {len(mesh.triangles)} triangles -> {out}_mesh.ply '
@@ -582,6 +603,9 @@ def fuse_turntable(args, frame_dir, out, max_depth, model, frame, cloud, intrins
         poses.append(p)
         fused += 1
     mesh = model.voxel_grid.extract_triangle_mesh().to_legacy()
+    dropped = drop_small_parts(mesh, args.min_part if args.min_part is not None else 0.05 if args.turntable else 0.01)
+    if dropped:
+        print(f'dropped {dropped} small parts of the mesh')
     o3d.io.write_triangle_mesh(out + '_mesh.ply', mesh)
     np.savetxt(out + '_poses.txt', np.array(poses).reshape(len(poses), 16))
     print(f'{index} frames: fused {fused}; {len(mesh.triangles)} triangles -> {out}_mesh.ply ({time.time() - t0:.0f} s)')
