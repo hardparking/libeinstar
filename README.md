@@ -25,11 +25,16 @@ or run `scripts/einstar-bringup.sh build`.
   from an EXStar project (`*.data_cm`), EXStar's CCF cache
   (`EXStar.app/Contents/Resources/res/Einscan-E10/200x150`) or a
   `--dump-flash` file; `einstar-calib` exports any of them as OpenCV YAML
-- `einstar::depth` (OpenCV): IR-stereo depth registered to the colour camera
+- `einstar::depth` (OpenCV): IR-stereo depth registered to the colour camera.
+  On Apple silicon the stereo matching runs on the GPU (Metal), with output
+  identical to the CPU's and ~40% less time per frame; `--backend cpu|metal`
+  in `einstar-depth` and `einstar-rgbd` picks one
 - RTAB-Map camera driver plus `einstar-rtabmap`, `einstar-synth` (synthetic
   sequences rendered through a real calibration) and `eval_trajectory.py`
 - Tests: `ctest --test-dir build`; set `EINSTAR_CAMERA_MODEL` and
-  `EINSTAR_CCF_DIR` to also check real calibration data
+  `EINSTAR_CCF_DIR` to also check real calibration data, and `EINSTAR_CALIB`
+  and `EINSTAR_FRAMES` (an `einstar-probe --out` directory) to compare the
+  Metal and CPU matchers on recorded frames
 
 ## Hardware tools
 
@@ -58,6 +63,10 @@ cmake -S . -B build -G Ninja
 cmake --build build && ctest --test-dir build
 cmake --install build --prefix /usr/local  # provides find_package(einstar)
 ```
+
+On Apple platforms Metal matching is built by default; the shaders are
+compiled at run time, so no Metal toolchain is needed. `-DEINSTAR_WITH_METAL=OFF`
+leaves it out.
 
 For RTAB-Map, add `-DEINSTAR_BUILD_RTABMAP=ON`. That builds against an
 RTAB-Map that already contains `CameraEinstar` (the proposed upstream patch,

@@ -1,11 +1,19 @@
 #include "einstar/depth.hpp"
 
+#include "sgbm.hpp"
+
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <cmath>
-#include <vector>
+#include <atomic>
+#include <cstdio>
+#include <exception>
 #include <limits>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace einstar {
 
@@ -23,6 +31,32 @@ cv::Mat to_calibration_orientation(const cv::Mat& image, unsigned stream_camera)
   cv::Mat out;
   cv::rotate(image, out, cv::ROTATE_180);
   return out;
+}
+
+bool backend_available(MatchBackend backend) {
+  return backend != MatchBackend::Metal || detail::sgbm_metal_available();
+}
+
+std::vector<MatchBackend> available_backends() {
+  std::vector<MatchBackend> out;
+  for (MatchBackend b : {MatchBackend::Cpu, MatchBackend::Metal})
+    if (backend_available(b)) out.push_back(b);
+  return out;
+}
+
+const char* to_string(MatchBackend backend) {
+  switch (backend) {
+    case MatchBackend::Auto: return "auto";
+    case MatchBackend::Cpu: return "cpu";
+    case MatchBackend::Metal: return "metal";
+  }
+  return "?";
+}
+
+std::optional<MatchBackend> parse_match_backend(std::string_view name) {
+  for (MatchBackend b : {MatchBackend::Auto, MatchBackend::Cpu, MatchBackend::Metal})
+    if (name == to_string(b)) return b;
+  return std::nullopt;
 }
 
 cv::Mat color_in_calibration_orientation(const cv::Mat& raw_bayer) {
@@ -53,6 +87,29 @@ cv::Rect2d rectified_bounds(const CameraIntrinsics& in, const cv::Mat& R, double
   return cv::boundingRect(rect);
 }
 
+detail::SgbmConfig sgbm_config(const DepthParams& p, int num_disp) {
+  const int b = p.block_size;
+  detail::SgbmConfig c;
+  c.num_disparities = num_disp;
+  c.block_size = b;
+  c.p1 = p.p1_factor * b * b;
+  c.p2 = p.p2_factor * b * b;
+  c.uniqueness_ratio = p.uniqueness_ratio;
+  c.speckle_window = p.speckle_window;
+  c.speckle_range = p.speckle_range;
+  return c;
+}
+
+// {start, size} of the disparity window searched against the right image
+// stretched by k, for left columns up to last_u. Column u matching right
+// column ur sits at k*ur in the stretched image, so the search runs over
+// u - k*ur = (1 - k)*u + k*d for d in [min_disp, min_disp + num_disp).
+std::pair<int, int> stretch_window(double k, double last_u, int min_disp, int num_disp) {
+  const int min_k = floor16(std::min(0.0, (1 - k) * last_u) + k * min_disp);
+  const int max_k = static_cast<int>(std::ceil(std::max(0.0, (1 - k) * last_u) + k * (min_disp + num_disp)));
+  return {min_k, std::max(16, ceil16(max_k - min_k))};
+}
+
 // SGBM disparity u - ur for column u of `l` matching column ur of `r`,
 // searched in [min_disp, min_disp + num_disp); unmatched pixels are -inf.
 // SGBM searches [minDisparity, minDisparity + numDisparities) and leaves
@@ -69,12 +126,26 @@ cv::Mat match(const cv::Mat& l, const cv::Mat& r, int min_disp, int num_disp, co
                      cv::Scalar(0));
   cv::copyMakeBorder(r, rpad, 0, 0, num_disp + pad_r, width - r.cols - num_disp - pad_r, cv::BORDER_CONSTANT,
                      cv::Scalar(0));
-  const int b = p.block_size;
-  auto sgbm = cv::StereoSGBM::create(0, num_disp, b, p.p1_factor * b * b, p.p2_factor * b * b, 1, 0,
-                                     p.uniqueness_ratio, p.speckle_window, p.speckle_range,
-                                     cv::StereoSGBM::MODE_SGBM_3WAY);
+  const detail::SgbmConfig c = sgbm_config(p, num_disp);
   cv::Mat d16, d;
-  sgbm->compute(lpad, rpad, d16);
+  // Auto matches on the CPU where Metal does not support the configuration,
+  // and for good after a Metal failure (StereoDepth rejects unsupported
+  // configurations for an explicit Metal backend).
+  static std::atomic<bool> metal_failed{false};
+  const bool metal = p.backend == MatchBackend::Metal ||
+                     (p.backend == MatchBackend::Auto && !metal_failed && detail::sgbm_metal_available() &&
+                      detail::sgbm_metal_supports(c));
+  if (metal && p.backend == MatchBackend::Auto) {
+    try {
+      d16 = detail::sgbm_metal(lpad, rpad, c);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "einstar: Metal matching failed, using the CPU: %s\n", e.what());
+      metal_failed = true;
+    }
+  } else if (metal) {
+    d16 = detail::sgbm_metal(lpad, rpad, c);
+  }
+  if (d16.empty()) d16 = detail::sgbm_cpu(lpad, rpad, c);
   d16.colRange(num_disp + pad_l, num_disp + pad_l + l.cols).convertTo(d, CV_32F, 1.0 / 16.0);
   d.setTo(-std::numeric_limits<float>::infinity(), d < 0);
   d += min_disp;
@@ -85,6 +156,8 @@ cv::Mat match(const cv::Mat& l, const cv::Mat& r, int min_disp, int num_disp, co
 
 StereoDepth::StereoDepth(const CameraModel& model, cv::Size size, DepthParams params)
     : size_(size), params_(params) {
+  if (!backend_available(params.backend))
+    throw std::invalid_argument(std::string("stereo matching backend not available: ") + to_string(params.backend));
   // Pick the geometric left IR camera: OpenCV's horizontal rectification
   // expects the second camera at negative x in the first camera's frame.
   const bool swap = model.relative(kIrLeftCamera, kIrRightCamera).T[0] > 0;
@@ -139,6 +212,13 @@ StereoDepth::StereoDepth(const CameraModel& model, cv::Size size, DepthParams pa
   // Rectified disparity u_l - u_r = f*B/Z + disp_offset_.
   min_disp_ = floor16(f_ * baseline_mm_ / params.max_depth_mm + disp_offset_);
   num_disp_ = std::max(16, ceil16(f_ * baseline_mm_ / params.min_depth_mm + disp_offset_ - min_disp_));
+  if (params.backend == MatchBackend::Metal)
+    for (const double k : params.stretches)
+      if (k > 0 &&
+          !detail::sgbm_metal_supports(sgbm_config(params, stretch_window(k, scaled_.width - 1, min_disp_, num_disp_).second)))
+        throw std::invalid_argument(
+            "Metal matching does not support these parameters (at most 1024 disparities: raise min_depth_mm or "
+            "lower scale; block_size up to 15)");
 
   color_K_ = camera_matrix(c);
   cv::initUndistortRectifyMap(color_K_, distortion_coeffs(c), cv::Mat(), color_K_, size_, CV_32FC1, map_c1_, map_c2_);
@@ -174,9 +254,8 @@ cv::Mat StereoDepth::disparity(const cv::Mat& lr, const cv::Mat& rr) const {
                  k < 1 ? cv::INTER_AREA : cv::INTER_LINEAR);
     // Column u matching right column ur sits at k*ur in the stretched image,
     // so the search runs over u - k*ur = (1 - k)*u + k*d for d in the window.
-    const int min_k = floor16(std::min(0.0, (1 - k) * last_u) + k * min_disp_);
-    const int max_k = static_cast<int>(std::ceil(std::max(0.0, (1 - k) * last_u) + k * (min_disp_ + num_disp_)));
-    const cv::Mat dk = match(le, rk, min_k, std::max(16, ceil16(max_k - min_k)), params_);
+    const auto [min_k, num_k] = stretch_window(k, last_u, min_disp_, num_disp_);
+    const cv::Mat dk = match(le, rk, min_k, num_k, params_);
     // Keep a match only where earlier stretches found nothing, both pixels
     // sample inside their source images, and the depth is in range.
     for (int v = 0; v < d.rows; ++v) {
