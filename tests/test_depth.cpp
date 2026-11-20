@@ -279,6 +279,31 @@ int main() {
     if (cov < 0.85 || cov < cov_plain + 0.15) { std::printf("FAIL slanted coverage\n"); ++failures; }
     if (err > 1.0) { std::printf("FAIL slanted depth\n"); ++failures; }
   }
+  // A window Metal does not support (over 1024 disparities at scale 1 down
+  // to 100 mm): an explicit Metal backend is rejected up front, and Auto
+  // matches it on the CPU, with the CPU's depth.
+  if (backend_available(MatchBackend::Metal)) {
+    DepthParams wide;
+    wide.scale = 1.0;
+    wide.min_depth_mm = 100;
+    wide.stretches = {1.0};
+    wide.backend = MatchBackend::Metal;
+    bool rejected = false;
+    try {
+      StereoDepth(m, {W, H}, wide);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    wide.backend = MatchBackend::Auto;
+    const StereoDepth sa(m, {W, H}, wide);
+    wide.backend = MatchBackend::Cpu;
+    const StereoDepth sc(m, {W, H}, wide);
+    const int differ = cv::countNonZero(sa.depth_in_color(left, right) != sc.depth_in_color(left, right));
+    std::printf("wide window (%d disparities): metal %s, auto vs cpu %d pixels differ\n", sa.num_disparities(),
+                rejected ? "rejected" : "accepted", differ);
+    if (sa.num_disparities() <= 1024 || !rejected) { std::printf("FAIL wide window not rejected for metal\n"); ++failures; }
+    if (differ) { std::printf("FAIL wide window auto != cpu\n"); ++failures; }
+  }
   if (const char* path = std::getenv("EINSTAR_CAMERA_MODEL")) failures += real_calibration_case(path, texture);
   std::printf(failures ? "FAIL\n" : "PASS\n");
   return failures ? 1 : 0;

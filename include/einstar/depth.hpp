@@ -9,6 +9,8 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #include "einstar/calibration.hpp"
@@ -26,6 +28,22 @@ cv::Mat to_calibration_orientation(const cv::Mat& image, unsigned stream_camera)
 // Raw colour stream (Bayer, as EXStar converts it with COLOR_BayerRG2BGR)
 // -> BGR in calibration orientation.
 cv::Mat color_in_calibration_orientation(const cv::Mat& raw_bayer);
+
+// Stereo matcher behind StereoDepth. Metal (Apple GPUs) reproduces the CPU
+// matcher (OpenCV's StereoSGBM) bit for bit, so depth does not depend on
+// the choice. Auto picks Metal when available, else Cpu; it uses the CPU
+// for windows Metal does not support (over 1024 disparities) and for good
+// after a Metal failure.
+enum class MatchBackend { Auto, Cpu, Metal };
+
+// Whether a backend can run here: built in and, for GPUs, a device present.
+// Auto and Cpu always can.
+bool backend_available(MatchBackend backend);
+// The concrete backends (not Auto) that can run here, Cpu first.
+std::vector<MatchBackend> available_backends();
+// "auto", "cpu", "metal", and back.
+const char* to_string(MatchBackend backend);
+std::optional<MatchBackend> parse_match_backend(std::string_view name);
 
 struct DepthParams {
   // Matching runs on rectified images scaled by this factor, relative to
@@ -65,10 +83,15 @@ struct DepthParams {
   // stretch costs one more matching pass (65 -> 131 ms per frame at scale
   // 0.5 on Apple M-series).
   std::vector<double> stretches = {1.0, 0.6};
+  // Metal matched one stretch of a real frame at scale 0.5 in ~35 ms against
+  // ~65 ms on the CPU (Apple M5 Pro).
+  MatchBackend backend = MatchBackend::Auto;
 };
 
 class StereoDepth {
  public:
+  // Throws std::invalid_argument if params.backend is not available here,
+  // or if it does not support the disparity window the depth range needs.
   StereoDepth(const CameraModel& model, cv::Size size = {1280, 1024}, DepthParams params = {});
 
   // Undistorted colour intrinsics used for the output depth/colour images.
