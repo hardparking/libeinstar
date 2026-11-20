@@ -3,6 +3,9 @@
 //   einstar-rgbd OUT_DIR [--calib FILE] [--seconds N]        live from the scanner
 //   einstar-rgbd OUT_DIR --calib FILE --replay FRAME_DIR     einstar-probe / EINSTAR_RECORD_DIR captures
 //
+// --backend auto|cpu|metal picks the stereo matcher (default auto: Metal on
+// Apple silicon); all give the same depth.
+//
 // Each frame set becomes OUT_DIR/c_NNNNN.png (colour, BGR) and
 // OUT_DIR/d_NNNNN.png (depth, uint16 in 0.1 mm, 0 = none), both at half
 // resolution (640x512) in the undistorted colour camera, upright.
@@ -27,6 +30,8 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <memory>
+#include <stdexcept>
 #include <string>
 
 #include "einstar/calibration.hpp"
@@ -193,11 +198,20 @@ int live(Device& dev, Writer& writer, int seconds) {
 int main(int argc, char** argv) {
   std::string out, calib_path, replay_dir;
   int seconds = 0;
+  DepthParams params;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--calib" && i + 1 < argc) calib_path = argv[++i];
     else if (a == "--replay" && i + 1 < argc) replay_dir = argv[++i];
     else if (a == "--seconds" && i + 1 < argc) seconds = std::atoi(argv[++i]);
+    else if (a == "--backend" && i + 1 < argc) {
+      const auto b = parse_match_backend(argv[++i]);
+      if (!b) {
+        std::fprintf(stderr, "unknown --backend: %s\n", argv[i]);
+        return 2;
+      }
+      params.backend = *b;
+    }
     else if (out.empty() && a[0] != '-') out = a;
     else {
       std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
@@ -205,8 +219,12 @@ int main(int argc, char** argv) {
     }
   }
   if (out.empty() || (!replay_dir.empty() && calib_path.empty())) {
-    std::fprintf(stderr, "usage: %s OUT_DIR [--calib FILE] [--seconds N] | OUT_DIR --calib FILE --replay FRAME_DIR\n",
+    std::fprintf(stderr, "usage: %s OUT_DIR [--calib FILE] [--seconds N] | OUT_DIR --calib FILE --replay FRAME_DIR [--backend auto|cpu|metal]\n",
                  argv[0]);
+    return 2;
+  }
+  if (!backend_available(params.backend)) {
+    std::fprintf(stderr, "--backend %s: not available in this build or on this machine\n", to_string(params.backend));
     return 2;
   }
   std::signal(SIGINT, [](int) { g_stop = true; });
@@ -248,8 +266,14 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  const StereoDepth depth(*model, {kWidth, kHeight});
-  Writer writer(out, depth);
+  std::unique_ptr<StereoDepth> depth;
+  try {
+    depth = std::make_unique<StereoDepth>(*model, cv::Size{kWidth, kHeight}, params);
+  } catch (const std::invalid_argument& e) {
+    std::fprintf(stderr, "depth: %s\n", e.what());
+    return 2;
+  }
+  Writer writer(out, *depth);
   const int rc = dev ? live(*dev, writer, seconds) : replay(writer, replay_dir);
   writer.finish();
   std::printf("wrote %d frames to %s\n", writer.count(), out.c_str());

@@ -2,7 +2,7 @@
 //
 //   einstar-depth CALIB FRAME_DIR FRAME_ID [OUT_PREFIX]
 //                 [--scale S] [--block B] [--uniqueness U] [--speckle-window W]
-//                 [--min-depth MM] [--max-depth MM]
+//                 [--min-depth MM] [--max-depth MM] [--backend auto|cpu|metal]
 //
 // Reads frame_<id>_cam{0,1,2}.pgm (einstar-probe --out), prints depth
 // coverage and range, and writes OUT_PREFIX_depth.png (colour-mapped),
@@ -12,6 +12,8 @@
 #include <opencv2/imgproc.hpp>
 
 #include <cstdio>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,10 +33,22 @@ int main(int argc, char** argv) {
     else if (a == "--speckle-window" && i + 1 < argc) params.speckle_window = std::atoi(argv[++i]);
     else if (a == "--min-depth" && i + 1 < argc) params.min_depth_mm = static_cast<float>(std::atof(argv[++i]));
     else if (a == "--max-depth" && i + 1 < argc) params.max_depth_mm = static_cast<float>(std::atof(argv[++i]));
+    else if (a == "--backend" && i + 1 < argc) {
+      const auto b = parse_match_backend(argv[++i]);
+      if (!b) {
+        std::fprintf(stderr, "unknown --backend: %s\n", argv[i]);
+        return 2;
+      }
+      params.backend = *b;
+    }
     else pos.push_back(a);
   }
   if (pos.size() < 3) {
     std::fprintf(stderr, "usage: %s CALIB FRAME_DIR FRAME_ID [OUT_PREFIX]\n", argv[0]);
+    return 2;
+  }
+  if (!backend_available(params.backend)) {
+    std::fprintf(stderr, "--backend %s: not available in this build or on this machine\n", to_string(params.backend));
     return 2;
   }
   auto calib = load_calibration(pos[0]);
@@ -58,7 +72,14 @@ int main(int argc, char** argv) {
     (calibration_index_for_stream(stream) == kIrLeftCamera ? left : right) =
         to_calibration_orientation(img[stream], stream);
 
-  StereoDepth sd(*calib.model, img[0].size(), params);
+  std::unique_ptr<StereoDepth> matcher;
+  try {
+    matcher = std::make_unique<StereoDepth>(*calib.model, img[0].size(), params);
+  } catch (const std::invalid_argument& e) {
+    std::fprintf(stderr, "depth: %s\n", e.what());
+    return 2;
+  }
+  const StereoDepth& sd = *matcher;
   const cv::Mat depth = sd.depth_in_color(left, right);
   int valid = 0;
   double mn = 1e9, mx = 0, sum = 0;
