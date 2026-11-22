@@ -330,7 +330,7 @@ def main():
                     help='with --turntable, keep depth within this distance of the axis (default 150)')
     ap.add_argument('--min-part', type=float,
                     help='drop mesh parts with fewer triangles than this share of the largest part '
-                         '(default 0.05 with --turntable, else 0.01; 0 keeps all)')
+                         '(default 0.05 with --turntable, else 0: keep all parts)')
     ap.add_argument('--plate-clearance-mm', type=float, default=3,
                     help='with --turntable, drop depth up to this far above the turntable (default 3)')
     args = ap.parse_args()
@@ -523,7 +523,7 @@ def main():
             poses.append(pose)
         print(f'loop closure: {len(kf_poses)} keyframes, {loops} extra links ({time.time() - t1:.0f} s)')
     mesh = model.voxel_grid.extract_triangle_mesh().to_legacy()
-    dropped = drop_small_parts(mesh, args.min_part if args.min_part is not None else 0.05 if args.turntable else 0.01)
+    dropped = drop_small_parts(mesh, args.min_part if args.min_part is not None else 0.05 if args.turntable else 0)
     if dropped:
         print(f'dropped {dropped} small parts of the mesh')
     o3d.io.write_triangle_mesh(out + '_mesh.ply', mesh)
@@ -603,7 +603,7 @@ def fuse_turntable(args, frame_dir, out, max_depth, model, frame, cloud, intrins
         poses.append(p)
         fused += 1
     mesh = model.voxel_grid.extract_triangle_mesh().to_legacy()
-    dropped = drop_small_parts(mesh, args.min_part if args.min_part is not None else 0.05 if args.turntable else 0.01)
+    dropped = drop_small_parts(mesh, args.min_part if args.min_part is not None else 0.05 if args.turntable else 0)
     if dropped:
         print(f'dropped {dropped} small parts of the mesh')
     o3d.io.write_triangle_mesh(out + '_mesh.ply', mesh)
