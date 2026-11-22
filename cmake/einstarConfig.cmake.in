@@ -4,7 +4,10 @@ include(CMakeFindDependencyMacro)
 set(einstar_HAS_DEPTH @EINSTAR_HAS_DEPTH@)
 set(einstar_WITH_CUDA @EINSTAR_WITH_CUDA@)
 if(einstar_HAS_DEPTH)
-  find_dependency(OpenCV COMPONENTS core imgproc calib3d)
+  # The OpenCV modules einstar::depth was built against (OpenCV 5 has
+  # calib, stereo and geometry instead of calib3d).
+  set(einstar_OPENCV_COMPONENTS "@EINSTAR_OPENCV_COMPONENTS@")
+  find_dependency(OpenCV COMPONENTS ${einstar_OPENCV_COMPONENTS})
   if(einstar_WITH_CUDA)
     find_dependency(CUDAToolkit)
   endif()

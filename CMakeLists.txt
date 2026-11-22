@@ -51,10 +51,14 @@ set(EINSTAR_EXPORTED_TARGETS einstar_core einstar)
 set(EINSTAR_HAS_DEPTH OFF)
 
 if(EINSTAR_WITH_OPENCV)
-  find_package(OpenCV QUIET COMPONENTS core imgproc calib3d)
+  # The component list that worked is exported (einstarConfig.cmake) so that
+  # consumers look for the same modules: OpenCV 5 has no calib3d.
+  set(EINSTAR_OPENCV_COMPONENTS core imgproc calib3d)
+  find_package(OpenCV QUIET COMPONENTS ${EINSTAR_OPENCV_COMPONENTS})
   if(NOT OpenCV_FOUND)
     # OpenCV 5 split calib3d into calib, stereo and geometry
-    find_package(OpenCV 5 QUIET COMPONENTS core imgproc calib stereo geometry)
+    set(EINSTAR_OPENCV_COMPONENTS core imgproc calib stereo geometry)
+    find_package(OpenCV 5 QUIET COMPONENTS ${EINSTAR_OPENCV_COMPONENTS})
   endif()
   if(OpenCV_FOUND)
     add_library(einstar_depth STATIC src/depth.cpp src/sgbm.cpp)
