@@ -327,6 +327,32 @@ int main() {
     if (gcov < 0.8 || std::abs(gmed - z) > 1.0) { std::printf("FAIL gpu plane\n"); ++failures; }
     if (scov < 0.85 || serr > 1.0) { std::printf("FAIL gpu slanted plane\n"); ++failures; }
   }
+  // Retro-reflective markers: bright discs at known 3D points, seen by both
+  // IR cameras, are found and triangulated; a frame without any gives none.
+  {
+    struct Marker { double x, y, z; };
+    const Marker truth[] = {{-20, -10, 300}, {30, 0, 280}, {60, 15, 350}};
+    cv::Mat ml(H, W, CV_8U, cv::Scalar(10)), mr = ml.clone();
+    for (const Marker& t : truth) {
+      cv::circle(ml, {static_cast<int>(std::lround(CX + F * t.x / t.z)), static_cast<int>(std::lround(CY + F * t.y / t.z))}, 14,
+                 cv::Scalar(255), cv::FILLED);
+      cv::circle(mr, {static_cast<int>(std::lround(CX + F * (t.x - baseline) / t.z)), static_cast<int>(std::lround(CY + F * t.y / t.z))},
+                 14, cv::Scalar(255), cv::FILLED);
+    }
+    const auto found = sd.markers_in_color(ml, mr);
+    int matched = 0;
+    double worst = 0;
+    for (const Marker& t : truth)
+      for (const auto& p : found) {
+        const double e = cv::norm(cv::Point3d(p.x - t.x, p.y - t.y, p.z - t.z));
+        if (e < 5) { ++matched; worst = std::max(worst, e); break; }
+      }
+    const auto none = sd.markers_in_color(cv::Mat(H, W, CV_8U, cv::Scalar(10)), cv::Mat(H, W, CV_8U, cv::Scalar(10)));
+    std::printf("markers: %zu found for %zu placed, %d matched within %.2f mm; blank frame: %zu\n", found.size(),
+                sizeof truth / sizeof truth[0], matched, worst, none.size());
+    if (found.size() != 3 || matched != 3 || worst > 1.5) { std::printf("FAIL markers\n"); ++failures; }
+    if (!none.empty()) { std::printf("FAIL markers on a blank frame\n"); ++failures; }
+  }
   if (const char* path = std::getenv("EINSTAR_CAMERA_MODEL")) failures += real_calibration_case(path, texture);
   std::printf(failures ? "FAIL\n" : "PASS\n");
   return failures ? 1 : 0;

@@ -137,6 +137,48 @@ TEST(device_start_and_stop_scanning_follow_vendor_sequence) {
   CHECK(rx[5].opcode == 0x41 && rx[5].payload == std::vector<std::uint8_t>{0x00});
 }
 
+TEST(device_start_scanning_passes_the_trigger_ratio) {
+  OpenOptions rw;
+  rw.allow_writes = true;
+  auto o = open_fake(rw);
+  if (!o.device) return;
+  CHECK(o.device->start_scanning(90000, 3, 1).ok());
+  CHECK(o.device->trigger_counts().value() == std::make_pair(3u, 1u));
+  auto rx = o.scanner->received();
+  rx.erase(rx.begin());  // serial query
+  CHECK(rx.size() == 4);  // period, counts, start, period; then the getter
+  CHECK(rx[1].opcode == 0x41 && rx[1].payload == std::vector<std::uint8_t>{0x13});  // 1 rgb in the high nibble, 3 mono
+  CHECK(rx[2].opcode == 0x49 && rx[2].payload == be32(90000));
+}
+
+TEST(device_scan_settings_defaults_and_apply) {
+  const ScanSettings d;
+  // EXStar's V2.10 scan lighting and its 3:1 IR to colour trigger ratio.
+  CHECK(d.strobe_route0 == 3000 && d.strobe_route1 == 400 && d.laser_percent == 60);
+  CHECK(d.ir_exposure_us == 4000 && d.ir_gain == 105 && d.color_exposure_us == 5000 && d.color_gain == 180);
+  CHECK(d.mono_triggers == 3 && d.rgb_triggers == 1);
+
+  OpenOptions rw;
+  rw.allow_writes = true;
+  auto o = open_fake(rw);
+  if (!o.device) return;
+  CHECK(o.device->apply(d).ok());
+  auto rx = o.scanner->received();
+  rx.erase(rx.begin());  // serial query
+  int strobes = 0, lasers = 0;
+  for (const auto& c : rx) {
+    if (c.opcode == 0x70) {
+      ++strobes;
+      CHECK(c.payload == (c.payload[0] == 0 ? std::vector<std::uint8_t>{0, 0x0B, 0xB8} : std::vector<std::uint8_t>{1, 0x01, 0x90}));
+    }
+    if (c.opcode == 0x68) {
+      ++lasers;
+      CHECK(c.payload == std::vector<std::uint8_t>{60});
+    }
+  }
+  CHECK(strobes == 2 && lasers == 1);
+}
+
 TEST(device_reads_custom_info_across_pages) {
   auto o = open_fake({}, [](FakeScanner& f) {
     for (int p = 0; p < 2; ++p) {
