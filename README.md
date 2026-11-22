@@ -28,7 +28,11 @@ or run `scripts/einstar-bringup.sh build`.
 - `einstar::depth` (OpenCV): IR-stereo depth registered to the colour camera.
   On Apple silicon the stereo matching runs on the GPU (Metal), with output
   identical to the CPU's and ~40% less time per frame; `--backend cpu|metal`
-  in `einstar-depth` and `einstar-rgbd` picks one
+  in `einstar-depth` and `einstar-rgbd` picks one. A CUDA GPU can match with
+  libSGM instead (`-DEINSTAR_WITH_CUDA=ON -DLIBSGM_ROOT=...`, `--backend cuda`;
+  similar but not identical depth, and untested without a CUDA machine).
+  `einstar-rgbd` also writes retro-reflective marker positions (`m_NNNNN.txt`,
+  skipped with `--no-markers`) for `tools/einstar_fusion.py`
 - RTAB-Map camera driver plus `einstar-rtabmap`, `einstar-synth` (synthetic
   sequences rendered through a real calibration) and `eval_trajectory.py`
 - Tests: `ctest --test-dir build`; set `EINSTAR_CAMERA_MODEL` and

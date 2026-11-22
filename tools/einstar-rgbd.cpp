@@ -15,9 +15,11 @@
 // Each frame set becomes OUT_DIR/c_NNNNN.png (colour, BGR) and
 // OUT_DIR/d_NNNNN.png (depth, uint16 in 0.1 mm, 0 = none), both at half
 // resolution (640x512) in the undistorted colour camera, upright.
-// OUT_DIR/m_NNNNN.txt lists retro-reflective markers, one "x y z" (mm) per
-// line in the same upright camera frame. OUT_DIR/intrinsics.txt holds "fx fy cx cy width height" for those images
-// and is written first; OUT_DIR/done is written last. Live frames appear
+// OUT_DIR/m_NNNNN.txt lists the retro-reflective markers found in a frame, one
+// "x y z" (mm) per line in the same upright camera frame; frames with no
+// markers get no file, and --no-markers skips the detection (and the files)
+// altogether. OUT_DIR/intrinsics.txt holds "fx fy cx cy width height" for those
+// images and is written first; OUT_DIR/done is written last. Live frames appear
 // while scanning (the depth image is renamed into place last), so a reader
 // can follow the directory. Live mode reads the calibration from the scanner
 // unless --calib is given, keeps the IR exposure steady with AutoExposure and
@@ -37,6 +39,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <system_error>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -62,7 +65,8 @@ struct FrameSet {
 
 class Writer {
  public:
-  Writer(fs::path dir, const StereoDepth& depth) : dir_(std::move(dir)), depth_(depth) {
+  Writer(fs::path dir, const StereoDepth& depth, bool markers)
+      : dir_(std::move(dir)), depth_(depth), markers_(markers) {
     // Output is upright: the calibration frame is upside down relative to
     // the scanner's natural orientation, so the principal point mirrors.
     const cv::Mat& K = depth.color_K();
@@ -90,12 +94,21 @@ class Writer {
     char name[32];
     std::snprintf(name, sizeof name, "c_%05d.png", n_);
     cv::imwrite((dir_ / name).string(), c);
-    // Markers in the same upright camera frame as the images (the 180 degree
-    // turn negates x and y), written before the depth image completes the set.
-    std::snprintf(name, sizeof name, "m_%05d.txt", n_);
-    std::ofstream markers(dir_ / name);
-    for (const auto& p : depth_.markers_in_color(left, right)) markers << -p.x << ' ' << -p.y << ' ' << p.z << '\n';
-    markers.close();
+    if (markers_) {
+      // Markers in the same upright camera frame as the images (the 180 degree
+      // turn negates x and y), written before the depth image completes the
+      // set. A frame without markers gets no file (and no stale one from an
+      // earlier run in the same directory).
+      std::snprintf(name, sizeof name, "m_%05d.txt", n_);
+      const auto found = depth_.markers_in_color(left, right);
+      if (found.empty()) {
+        std::error_code ec;
+        fs::remove(dir_ / name, ec);
+      } else {
+        std::ofstream out(dir_ / name);
+        for (const auto& p : found) out << -p.x << ' ' << -p.y << ' ' << p.z << '\n';
+      }
+    }
     std::snprintf(name, sizeof name, "d_%05d.png", n_);
     const fs::path tmp = dir_ / ".d_tmp.png";
     cv::imwrite(tmp.string(), d);
@@ -110,6 +123,7 @@ class Writer {
  private:
   fs::path dir_;
   const StereoDepth& depth_;
+  bool markers_;
   int n_ = 0;
 };
 
@@ -212,6 +226,7 @@ int main(int argc, char** argv) {
   std::string out, calib_path, replay_dir;
   int seconds = 0;
   DepthParams params;
+  bool markers = true;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--calib" && i + 1 < argc) calib_path = argv[++i];
@@ -229,6 +244,7 @@ int main(int argc, char** argv) {
     else if (a == "--max-depth-mm" && i + 1 < argc) params.max_depth_mm = std::strtof(argv[++i], nullptr);
     else if (a == "--scale" && i + 1 < argc) params.scale = std::strtod(argv[++i], nullptr);
     else if (a == "--single-pass") params.stretches = {1.0};
+    else if (a == "--no-markers") markers = false;
     else if (out.empty() && a[0] != '-') out = a;
     else {
       std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
@@ -238,7 +254,8 @@ int main(int argc, char** argv) {
   if (out.empty() || (!replay_dir.empty() && calib_path.empty())) {
     std::fprintf(stderr,
                  "usage: %s OUT_DIR [--calib FILE] [--seconds N] | OUT_DIR --calib FILE --replay FRAME_DIR\n"
-                 "       depth: [--backend auto|cpu|metal|cuda] [--min-depth-mm N] [--max-depth-mm N] [--scale S] [--single-pass]\n",
+                 "       depth: [--backend auto|cpu|metal|cuda] [--min-depth-mm N] [--max-depth-mm N] [--scale S] [--single-pass]\n"
+                 "       [--no-markers]\n",
                  argv[0]);
     return 2;
   }
@@ -297,7 +314,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "depth: %s\n", e.what());
     return 2;
   }
-  Writer writer(out, *depth);
+  Writer writer(out, *depth, markers);
   const int rc = dev ? live(*dev, writer, seconds) : replay(writer, replay_dir);
   writer.finish();
   std::printf("wrote %d frames to %s\n", writer.count(), out.c_str());
